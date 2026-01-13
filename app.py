@@ -6,41 +6,24 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
 from groq import Groq
 import io
+from datetime import datetime
+from fpdf import FPDF
 
 # ========================================================
-# 1. APP CONFIGURATION & STYLING
+# 1. APP CONFIGURATION
 # ========================================================
 st.set_page_config(
-    page_title="RetainIQ: Customer Success AI", 
+    page_title="RetainIQ: Customer Intelligence", 
     page_icon="🧠", 
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# Custom CSS for "Real World" Look
+# Custom CSS
 st.markdown("""
     <style>
-    .metric-card {
-        background-color: #f9f9f9;
-        border-radius: 10px;
-        padding: 20px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #fff;
-        border-radius: 4px;
-        color: #555;
-        font-weight: 600;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #e6f3ff;
-        color: #0066cc;
-    }
+    .metric-card {background-color: #f0f2f6; border-radius: 10px; padding: 15px;}
+    .risk-high {color: #FF4B4B; font-weight: bold;}
+    .risk-low {color: #2E8B57; font-weight: bold;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -48,7 +31,6 @@ st.markdown("""
 # 2. SYSTEM FUNCTIONS
 # ========================================================
 
-# Secure Database Connection
 def get_connection():
     try:
         return psycopg2.connect(
@@ -57,285 +39,218 @@ def get_connection():
             user=st.secrets["DB_USER"],
             password=st.secrets["DB_PASS"]
         )
-    except Exception as e:
-        return None
-
-# Initialize Groq AI
-try:
-    groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-    ai_status = "✅ Active"
-except:
-    groq_client = None
-    ai_status = "❌ Inactive (Missing Key)"
-
-# Load Data (Cached for Speed)
-@st.cache_data(ttl=600)
-def load_data():
-    conn = get_connection()
-    if not conn:
-        return None
-    try:
-        df = pd.read_sql("SELECT * FROM telecom_churn", conn)
-        conn.close()
-        return df
     except:
         return None
 
-# Train/Retrain Model on the Fly
-def train_model(df):
-    le = LabelEncoder()
-    # Handle variations in 'contract' column if data changes
-    if 'contract' in df.columns:
-        df['contract_code'] = le.fit_transform(df['contract'])
-    else:
-        df['contract_code'] = 0 # Fallback
-        
-    # Standardize Churn Column
-    if df['churn'].dtype == 'object':
-        df['churn_code'] = df['churn'].apply(lambda x: 1 if x == 'Yes' else 0)
-    else:
-        df['churn_code'] = df['churn']
+try:
+    groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+except:
+    groq_client = None
+
+# ========================================================
+# 3. ADVANCED LOGIC: TRANSACTION TO CHURN (RFM)
+# ========================================================
+def process_sales_data(df):
+    """
+    Turns raw sales rows (Date, Customer, Amount) into Churn Risk Profile.
+    """
+    # 1. Standardize Columns
+    # Map your specific file columns to standard names
+    col_map = {
+        'OrderDate': 'date', 'Date': 'date',
+        'CustomerName': 'customer', 'Customer': 'customer',
+        'SalesAmount': 'amount', 'Amount': 'amount', 'Price': 'amount'
+    }
+    df = df.rename(columns=col_map)
     
-    # Train Model (Simple Random Forest)
-    X = df[['tenure', 'monthly_charges', 'contract_code']]
-    y = df['churn_code']
-    model = RandomForestClassifier(n_estimators=50, random_state=42)
-    model.fit(X, y)
-    return model, le
-
-# ========================================================
-# 3. SIDEBAR (SYSTEM STATUS)
-# ========================================================
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/8649/8649607.png", width=80)
-    st.title("RetainIQ 🧠")
-    st.caption("Intelligent Customer Success")
-    st.markdown("---")
+    # 2. Convert Date
+    df['date'] = pd.to_datetime(df['date'])
     
-    # System Health Check
-    st.subheader("System Status")
+    # 3. Reference Date (Today or max date in file)
+    snapshot_date = df['date'].max()
     
-    # DB Check
-    conn_check = get_connection()
-    if conn_check:
-        st.success(f"Database: Connected")
-        conn_check.close()
-    else:
-        st.error("Database: Disconnected")
-        
-    # AI Check
-    if groq_client:
-        st.success(f"AI Engine: {ai_status}")
-    else:
-        st.warning(f"AI Engine: {ai_status}")
-        
-    st.markdown("---")
-    st.info("💡 **Pro Tip:** Upload your weekly sales Excel file in the 'Batch Predict' tab to forecast risks.")
+    # 4. RFM Calculation (The Magic)
+    rfm = df.groupby('customer').agg({
+        'date': lambda x: (snapshot_date - x.max()).days, # Recency (Days since last buy)
+        'customer': 'count', # Frequency (Count of orders)
+        'amount': 'sum' # Monetary (Total spend)
+    }).rename(columns={'date': 'Recency', 'customer': 'Frequency', 'amount': 'Monetary'})
+    
+    # 5. Risk Rule Engine (Customize this logic!)
+    # Rule: If haven't bought in 90 days = High Risk
+    # Rule: If bought recently but spent little = Medium Risk
+    def define_risk(row):
+        if row['Recency'] > 90:
+            return '🔴 High Churn Risk'
+        elif row['Recency'] > 45:
+            return '🟡 Medium Risk'
+        else:
+            return '🟢 Loyal'
+
+    rfm['Risk Status'] = rfm.apply(define_risk, axis=1)
+    return rfm.reset_index(), snapshot_date
 
 # ========================================================
-# 4. MAIN APPLICATION
+# 4. PDF GENERATOR
 # ========================================================
+def generate_pdf(df_risk):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    
+    pdf.cell(200, 10, txt="RetainIQ - Churn Risk Report", ln=True, align='C')
+    pdf.ln(10)
+    
+    # Table Header
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(50, 10, "Customer", 1)
+    pdf.cell(30, 10, "Days Silent", 1)
+    pdf.cell(40, 10, "Total Spend", 1)
+    pdf.cell(50, 10, "Status", 1)
+    pdf.ln()
+    
+    # Rows
+    pdf.set_font("Arial", size=10)
+    for index, row in df_risk.iterrows():
+        status = row['Risk Status']
+        # Filter for PDF to only show risk
+        if "High" in status or "Medium" in status:
+            pdf.cell(50, 10, str(row['customer']), 1)
+            pdf.cell(30, 10, str(row['Recency']), 1)
+            pdf.cell(40, 10, f"${row['Monetary']:.2f}", 1)
+            pdf.cell(50, 10, status, 1)
+            pdf.ln()
+            
+    return pdf.output(dest='S').encode('latin-1')
 
-# Load Data
-df_main = load_data()
+# ========================================================
+# 5. UI LAYOUT
+# ========================================================
+st.sidebar.image("https://cdn-icons-png.flaticon.com/512/8649/8649607.png", width=60)
+st.sidebar.title("RetainIQ Pro")
+st.sidebar.info("Upload raw sales data (Name, Date, Amount) to detect hidden churn risks.")
 
-if df_main is None:
-    st.error("🚨 Critical Error: Could not connect to Supabase Database. Please check your Secrets.")
-    st.stop()
+st.title("🧠 RetainIQ: Transactional Churn Engine")
 
-# Train Model
-model, le = train_model(df_main)
+tab1, tab2 = st.tabs(["📂 Sales Data Upload", "🤖 AI Strategy"])
 
-# Tabs
-tab1, tab2, tab3 = st.tabs(["📊 Executive Dashboard", "📂 Batch Risk Analysis", "🤖 AI Consultant"])
-
-# --------------------------------------------------------
-# TAB 1: EXECUTIVE DASHBOARD
-# --------------------------------------------------------
 with tab1:
-    st.header("Real-Time Retention Overview")
+    st.header("Analyze Customer Sales Data")
     
-    # KPIs
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    with kpi1:
-        st.metric("Total Active Customers", f"{len(df_main):,}")
-    with kpi2:
-        churn_rate = df_main['churn_code'].mean() * 100
-        st.metric("Current Churn Rate", f"{churn_rate:.1f}%", delta="-0.5%" if churn_rate < 30 else "+1.2%", delta_color="inverse")
-    with kpi3:
-        avg_rev = df_main['monthly_charges'].mean()
-        st.metric("Avg. Revenue Per User", f"${avg_rev:.2f}")
-    with kpi4:
-        risk_count = len(df_main[df_main['churn_code']==1])
-        st.metric("High Risk Customers", f"{risk_count}", "Action Needed", delta_color="inverse")
-
-    st.markdown("---")
-
-    # Interactive Charts
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("📉 Churn Distribution by Contract")
-        # Enhancing the visual
-        fig_contract = px.bar(df_main.groupby(['contract', 'churn']).size().reset_index(name='count'), 
-                              x="contract", y="count", color="churn", 
-                              color_discrete_map={'Yes':'#FF4B4B', 'No':'#2E8B57'},
-                              barmode='group')
-        st.plotly_chart(fig_contract, use_container_width=True)
+    uploaded_file = st.file_uploader("Upload Excel/CSV (Required Columns: CustomerName, OrderDate, SalesAmount)", type=['csv', 'xlsx'])
     
-    with c2:
-        st.subheader("💰 Revenue Risk Analysis")
-        fig_scatter = px.scatter(df_main, x="tenure", y="monthly_charges", color="churn",
-                               size="monthly_charges", 
-                               color_discrete_map={'Yes':'#FF4B4B', 'No':'#2E8B57'},
-                               hover_data=['customer_id'])
-        st.plotly_chart(fig_scatter, use_container_width=True)
+    # Demo Data Button
+    if st.button("Use Demo Data (Your SalesData.csv)"):
+        # Create a mock dataframe mimicking your file structure
+        data = {
+            'OrderDate': pd.date_range(start='2024-01-01', periods=20).tolist() + pd.date_range(start='2023-01-01', periods=5).tolist(),
+            'CustomerName': ['Kabir', 'Meera', 'Pooja', 'Aarav', 'Rohan']*5,
+            'SalesAmount': [1200, 3500, 400, 21000, 500]*5
+        }
+        df_upload = pd.DataFrame(data)
+        st.session_state['df_upload'] = df_upload
+        st.success("Loaded Demo Data!")
 
-# --------------------------------------------------------
-# TAB 2: BATCH PREDICTION (EXCEL + CSV)
-# --------------------------------------------------------
-with tab2:
-    st.header("📂 Bulk Risk Analysis")
-    st.write("Upload your weekly customer data (Excel or CSV) to identify at-risk accounts instantly.")
-    
-    # 1. Template Download
-    col_dl, col_up = st.columns([1, 2])
-    with col_dl:
-        st.info("📋 **Required Format:**\nColumns: `tenure`, `monthly_charges`, `contract`")
-        # Create a mock excel file in memory for download
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            pd.DataFrame({
-                'tenure': [12, 5, 72],
-                'monthly_charges': [70.5, 95.0, 110.0],
-                'contract': ['Month-to-month', 'Month-to-month', 'Two year']
-            }).to_excel(writer, index=False)
-        
-        st.download_button(
-            label="⬇️ Download Excel Template",
-            data=buffer.getvalue(),
-            file_name="customer_template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    # 2. File Uploader
-    uploaded_file = st.file_uploader("Upload File", type=['csv', 'xlsx'])
-    
-    if uploaded_file is not None:
+    if uploaded_file:
         try:
-            # Detect File Type and Load
             if uploaded_file.name.endswith('.csv'):
                 df_upload = pd.read_csv(uploaded_file)
             else:
                 df_upload = pd.read_excel(uploaded_file)
-            
-            st.write(f"✅ Loaded **{len(df_upload)} rows** from `{uploaded_file.name}`")
-            
-            # Validation: Check if columns exist
-            required_cols = ['tenure', 'monthly_charges', 'contract']
-            missing_cols = [col for col in required_cols if col not in df_upload.columns]
-            
-            if missing_cols:
-                st.error(f"⚠️ Missing Columns: {', '.join(missing_cols)}")
-                st.write("Please rename your columns to match the template.")
-            else:
-                # 3. RUN PREDICTION
-                if st.button("🚀 Analyze Risk Factors"):
-                    with st.spinner("AI Model is processing..."):
-                        # Preprocess
-                        df_upload['contract_code'] = le.transform(df_upload['contract'].astype(str))
-                        X_new = df_upload[['tenure', 'monthly_charges', 'contract_code']]
-                        
-                        # Predict
-                        probs = model.predict_proba(X_new)[:, 1]
-                        df_upload['Churn Probability'] = probs
-                        df_upload['Risk Status'] = ["🔴 High Risk" if p > 0.5 else "🟢 Safe" for p in probs]
-                        
-                        # Show Results with Color
-                        st.dataframe(
-                            df_upload.style.applymap(
-                                lambda v: 'color: red; font-weight: bold;' if 'High Risk' in str(v) else 'color: green;', 
-                                subset=['Risk Status']
-                            )
-                        )
-                        
-                        # Download Results
-                        res_buffer = io.BytesIO()
-                        with pd.ExcelWriter(res_buffer, engine='openpyxl') as writer:
-                            df_upload.to_excel(writer, index=False)
-                        
-                        st.download_button(
-                            "⬇️ Download Analysis Report (.xlsx)",
-                            data=res_buffer.getvalue(),
-                            file_name="RetainIQ_Analysis_Report.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                        
-        except Exception as e:
-            st.error(f"Error processing file: {e}")
+            st.session_state['df_upload'] = df_upload
+            st.success("File Uploaded Successfully")
+        except:
+            st.error("Error reading file")
 
-# --------------------------------------------------------
-# TAB 3: AI CONSULTANT
-# --------------------------------------------------------
-with tab3:
-    st.header("🤖 Intelligent Retention Consultant")
-    
-    c_left, c_right = st.columns([1, 2])
-    
-    with c_left:
-        st.subheader("Select Customer")
-        # Filter high risk
-        risk_df = df_main[df_main['churn_code'] == 1]
-        if risk_df.empty:
-            st.success("🎉 No high-risk customers found!")
-        else:
-            selected_cust_str = st.selectbox(
-                "Choose an At-Risk Profile:",
-                risk_df['customer_id'].astype(str) + " (" + risk_df['contract'] + ")"
+    # If data exists, process it
+    if 'df_upload' in st.session_state:
+        df = st.session_state['df_upload']
+        
+        # Check columns
+        required = ['CustomerName', 'OrderDate', 'SalesAmount']
+        if not all(col in df.columns for col in required):
+            st.warning(f"Note: Your file should have columns roughly named: {required}. I will try to map them.")
+        
+        # PROCESS DATA
+        risk_profile, last_date = process_sales_data(df)
+        
+        # --- DASHBOARD ---
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Analysis Date", last_date.strftime('%Y-%m-%d'))
+        m2.metric("Total Customers", len(risk_profile))
+        high_risk = len(risk_profile[risk_profile['Risk Status'].str.contains("High")])
+        m3.metric("⚠ At Risk Customers", high_risk, delta="-Action Needed", delta_color="inverse")
+        
+        st.markdown("---")
+        
+        c1, c2 = st.columns([2, 1])
+        
+        with c1:
+            st.subheader("📉 Churn Risk vs Spending Power")
+            fig = px.scatter(risk_profile, x="Recency", y="Monetary", 
+                             color="Risk Status", size="Monetary",
+                             color_discrete_map={'🔴 High Churn Risk':'red', '🟡 Medium Risk':'orange', '🟢 Loyal':'green'},
+                             hover_data=['customer'],
+                             title="Who hasn't purchased recently? (Right Side = Danger Zone)")
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with c2:
+            st.subheader("📋 At-Risk List")
+            # Filter only risk
+            bad_customers = risk_profile[risk_profile['Risk Status'].str.contains("High|Medium")].sort_values('Recency', ascending=False)
+            st.dataframe(bad_customers[['customer', 'Recency', 'Risk Status']], hide_index=True)
+            
+            # PDF Download
+            pdf_bytes = generate_pdf(risk_profile)
+            st.download_button(
+                "⬇️ Download Risk PDF Report",
+                data=pdf_bytes,
+                file_name="Churn_Risk_Report.pdf",
+                mime="application/pdf"
             )
-            cust_id = selected_cust_str.split(" (")[0]
-            cust_data = df_main[df_main['customer_id'].astype(str) == cust_id].iloc[0]
-            
-            st.info(f"""
-            **Profile:**
-            - 🆔 ID: {cust_id}
-            - ⏱️ Tenure: {cust_data['tenure']} months
-            - 💵 Bill: ${cust_data['monthly_charges']}
-            - 📜 Contract: {cust_data['contract']}
-            """)
 
-    with c_right:
-        st.subheader("AI Strategy Generator")
-        if risk_df.empty:
-            st.write("System is all clear.")
+with tab2:
+    st.header("🤖 AI Retention Consultant")
+    
+    if 'df_upload' not in st.session_state:
+        st.info("Please upload data in the first tab.")
+    else:
+        # Get bad customers again
+        risk_profile, _ = process_sales_data(st.session_state['df_upload'])
+        bad_customers = risk_profile[risk_profile['Risk Status'].str.contains("High")].head(10)
+        
+        if bad_customers.empty:
+            st.success("No High Risk customers found!")
         else:
-            action = st.radio("What do you want to do?", ["Analyze Why", "Draft Retention Email", "Offer Calculation"])
+            selected_cust = st.selectbox("Select At-Risk Customer:", bad_customers['customer'].unique())
             
-            if st.button("✨ Generate AI Response"):
+            cust_stats = risk_profile[risk_profile['customer'] == selected_cust].iloc[0]
+            
+            st.markdown(f"""
+            ### Customer Profile: {selected_cust}
+            - **Days Since Last Buy:** {cust_stats['Recency']} days 🚨
+            - **Total Lifetime Spend:** ${cust_stats['Monetary']:.2f}
+            - **Total Orders:** {cust_stats['Frequency']}
+            """)
+            
+            if st.button("✨ Generate Recovery Plan"):
                 if not groq_client:
-                    st.error("Please configure GROQ_API_KEY in Secrets.")
+                    st.error("Configure Groq API Key in Secrets.")
                 else:
-                    with st.spinner("Consulting Llama-3 AI..."):
+                    with st.spinner("Analyzing purchase history..."):
+                        prompt = f"""
+                        You are a Customer Success Manager.
+                        Customer '{selected_cust}' used to be active but hasn't bought anything in {cust_stats['Recency']} days.
+                        Their total spend is ${cust_stats['Monetary']}.
                         
-                        prompt_context = f"""
-                        Customer Profile:
-                        - Tenure: {cust_data['tenure']} months
-                        - Monthly Bill: ${cust_data['monthly_charges']}
-                        - Contract: {cust_data['contract']}
-                        - Risk Level: High
+                        1. Diagnose: Why might a customer stop buying after {cust_stats['Frequency']} orders?
+                        2. Offer: Suggest a specific "Come Back" offer.
+                        3. Email: Write a short, personalized email to them.
                         """
                         
-                        if action == "Analyze Why":
-                            prompt = f"{prompt_context}\nExplain 3 psychological reasons why this specific customer might be churning based on their contract and bill."
-                        elif action == "Draft Retention Email":
-                            prompt = f"{prompt_context}\nWrite a short, warm, professional email offering a 15% discount if they renew for 1 year."
-                        else:
-                            prompt = f"{prompt_context}\nCalculate the Lifetime Value (LTV) if they stay for 12 more months vs if they leave now."
-
                         completion = groq_client.chat.completions.create(
                             model="llama3-8b-8192",
                             messages=[{"role": "user", "content": prompt}],
                             temperature=0.7
                         )
-                        
-                        st.success("Strategy Ready:")
                         st.markdown(completion.choices[0].message.content)
