@@ -161,49 +161,42 @@ def process_data(df):
     # 1. Clean Headers
     df.columns = df.columns.str.strip()
     
-    # 2. Map Columns (Matches your uploaded file EXACTLY)
+    # 2. Smart Mapping (Matches your file: OrderID, OrderDate, CustomerName, Region, Product, etc.)
     col_map = {
-        'OrderDate': 'Date', 
-        'CustomerName': 'Customer', 
-        'SalesAmount': 'Amount', 
-        'Product': 'Item'
+        'OrderDate': 'Date', 'date': 'Date',
+        'CustomerName': 'Customer', 'Customer': 'Customer',
+        'SalesAmount': 'Amount', 'Sales': 'Amount',
+        'Product': 'Item', 'ProductName': 'Item'
     }
     df = df.rename(columns=col_map)
     
-    # 3. Validation
+    # 3. Validation with Feedback
     required = ['Date', 'Customer', 'Amount']
     missing = [col for col in required if col not in df.columns]
     if missing:
-        return None, f"Missing columns: {missing}. Please check your file."
+        return None, f"⚠️ Column Mismatch! Found: {list(df.columns)}. Needed: {required}"
         
-    # 4. Processing
+    # 4. Data Type Conversion (Fail-Safe)
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
     
-    # Fail-safe for Product column
     if 'Item' not in df.columns:
         df['Item'] = "General Item"
     else:
-        df['Item'] = df['Item'].fillna("Unknown Product")
+        df['Item'] = df['Item'].fillna("Unknown")
 
-    # 5. RFM Calculation
+    # 5. Analysis Logic (RFM)
     snapshot_date = df['Date'].max()
     
-    # Safe Mode function for finding top item
-    def get_mode_item(x):
-        try:
-            return str(x.mode().iloc[0]) # Force to string
-        except:
-            return "General Item"
-
+    # Safe Mode Calculation
     rfm = df.groupby('Customer').agg({
         'Date': lambda x: (snapshot_date - x.max()).days,
         'Customer': 'count',
         'Amount': 'sum',
-        'Item': get_mode_item
+        'Item': lambda x: x.mode()[0] if not x.mode().empty else "Mix"
     }).rename(columns={'Date': 'Days_Silent', 'Customer': 'Orders', 'Amount': 'Total_Spent', 'Item': 'Top_Item'})
     
-    # 6. Risk Scoring
+    # 6. Risk Rules
     def get_risk(row):
         if row['Days_Silent'] > 90: return 'High Risk'
         elif row['Days_Silent'] > 45: return 'Medium Risk'
@@ -212,44 +205,34 @@ def process_data(df):
     rfm['Status'] = rfm.apply(get_risk, axis=1)
     return rfm.reset_index(), None
 
-def generate_pdf(df_risk):
-    # PDF Generator - SAFE MODE
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "RetainIQ Risk Report", ln=True, align='C')
-    pdf.ln(10)
+def generate_excel(df_risk):
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    worksheet = workbook.add_worksheet()
+
+    # Formats
+    header_fmt = workbook.add_format({'bold': True, 'bg_color': '#4B4BFF', 'font_color': 'white', 'border': 1})
+    money_fmt = workbook.add_format({'num_format': '₹#,##0', 'border': 1})
+    cell_fmt = workbook.add_format({'border': 1})
     
-    pdf.set_font("Arial", 'B', 10)
-    # Header
-    pdf.cell(55, 10, "Customer", 1)
-    pdf.cell(25, 10, "Days Silent", 1)
-    pdf.cell(40, 10, "Total (Rs.)", 1) # Use Rs. to avoid crash
-    pdf.cell(40, 10, "Top Item", 1)
-    pdf.cell(30, 10, "Status", 1)
-    pdf.ln()
-    
-    pdf.set_font("Arial", '', 9)
-    # Rows
-    for _, row in df_risk.iterrows():
-        if row['Status'] != "Safe":
-            # 1. Clean Customer Name (Remove emojis/weird chars)
-            cust_name = str(row['Customer'])[:25].encode('latin-1', 'replace').decode('latin-1')
+    # Headers
+    headers = ['Customer', 'Days Silent', 'Total Spent', 'Top Item', 'Status']
+    for col, header in enumerate(headers):
+        worksheet.write(0, col, header, header_fmt)
+        
+    # Data
+    row = 1
+    for _, data in df_risk.iterrows():
+        if data['Status'] != 'Safe':
+            worksheet.write(row, 0, data['Customer'], cell_fmt)
+            worksheet.write(row, 1, data['Days_Silent'], cell_fmt)
+            worksheet.write(row, 2, data['Total_Spent'], money_fmt) # Native Rupee Support
+            worksheet.write(row, 3, data['Top_Item'], cell_fmt)
+            worksheet.write(row, 4, data['Status'], cell_fmt)
+            row += 1
             
-            # 2. Clean Item Name
-            item_name = str(row['Top_Item'])[:20].encode('latin-1', 'replace').decode('latin-1')
-            
-            # 3. Format Money (No symbol, just numbers)
-            money_str = f"{row['Total_Spent']:.0f}"
-            
-            pdf.cell(55, 10, cust_name, 1)
-            pdf.cell(25, 10, str(row['Days_Silent']), 1)
-            pdf.cell(40, 10, money_str, 1)
-            pdf.cell(40, 10, item_name, 1)
-            pdf.cell(30, 10, row['Status'], 1)
-            pdf.ln()
-            
-    return pdf.output(dest='S').encode('latin-1', 'ignore')
+    workbook.close()
+    return output.getvalue()
     
 # ==========================================
 # 4. FEATURE RENDERERS
@@ -345,8 +328,14 @@ def render_dashboard():
             st.dataframe(display_df, hide_index=True)
                     
             # PDF Download
-            pdf_data = generate_pdf(risk_df)
-            st.download_button("⬇️ Download PDF Report", data=pdf_data, file_name="Risk_Report.pdf", mime="application/pdf")
+            # Excel Download (Replaces PDF)
+            excel_data = generate_excel(risk_df)
+            st.download_button(
+                    "⬇️ Download Risk Report (Excel)", 
+                    data=excel_data, 
+                    file_name="Risk_Report.xlsx", 
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )  
             
 def render_ai_consultant():
     st.header("🤖 AI Retention Specialist")
@@ -397,15 +386,20 @@ def render_ai_consultant():
             else:
                 with st.spinner("Consulting AI..."):
                     try:
+                        # Safe Prompt Construction
                         prompt = f"""
-                        You are a Retention Expert.
-                        Customer: {sel_cust}
-                        Silent for: {c_days} days.
-                        Total Spend: ₹{c_val}.
-                        Favorite Item: {c_item}.
+                        Role: Senior Retention Manager.
+                        Task: Save Customer '{sel_cust}'.
                         
-                        Task: {action}.
-                        Keep it professional, concise, and use Rupees (₹).
+                        Customer Data:
+                        - Absent: {c_days} days.
+                        - Value: {c_spend} INR.
+                        - Favorite: {c_item}.
+                        
+                        Output:
+                        1. Diagnosis (1 sentence).
+                        2. Win-back Offer (using ₹ symbol).
+                        3. Email Draft (Professional & Warm).
                         """
                         
                         res = groq_client.chat.completions.create(
