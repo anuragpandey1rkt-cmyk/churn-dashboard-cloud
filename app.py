@@ -8,6 +8,7 @@ from fpdf import FPDF
 import hashlib
 import time
 import datetime
+import xlsxwriter 
 
 # ==========================================
 # 1. CONFIGURATION & INIT
@@ -158,37 +159,47 @@ def logout_user():
 
 # --- CORE BUSINESS LOGIC (RFM Analysis) ---
 def process_data(df):
-    # 1. Clean Headers
+    # 1. Clean Headers (Remove spaces)
     df.columns = df.columns.str.strip()
     
-    # 2. Smart Mapping (Matches your file: OrderID, OrderDate, CustomerName, Region, Product, etc.)
-    col_map = {
-        'OrderDate': 'Date', 'date': 'Date',
-        'CustomerName': 'Customer', 'Customer': 'Customer',
-        'SalesAmount': 'Amount', 'Sales': 'Amount',
-        'Product': 'Item', 'ProductName': 'Item'
-    }
+    # 2. Smart Column Search
+    # We look for columns containing keywords like "Date" or "Amount"
+    col_map = {}
+    
+    # Find Date Column
+    date_cols = [c for c in df.columns if "Date" in c or "date" in c]
+    col_map[date_cols[0]] = 'Date' if date_cols else None
+    
+    # Find Customer Column
+    cust_cols = [c for c in df.columns if "Customer" in c or "Name" in c]
+    col_map[cust_cols[0]] = 'Customer' if cust_cols else None
+    
+    # Find Amount Column
+    amt_cols = [c for c in df.columns if "Amount" in c or "Sales" in c or "Price" in c]
+    col_map[amt_cols[0]] = 'Amount' if amt_cols else None
+    
+    # Find Product Column
+    prod_cols = [c for c in df.columns if "Product" in c or "Item" in c]
+    col_map[prod_cols[0]] = 'Item' if prod_cols else None
+
+    # Rename
     df = df.rename(columns=col_map)
     
-    # 3. Validation with Feedback
+    # 3. Validation
     required = ['Date', 'Customer', 'Amount']
     missing = [col for col in required if col not in df.columns]
+    
     if missing:
-        return None, f"⚠️ Column Mismatch! Found: {list(df.columns)}. Needed: {required}"
+        # Debug Message: Shows user exactly what columns were found
+        return None, f"⚠️ Error! Found columns: {list(df.columns)}. Missing: {missing}"
         
-    # 4. Data Type Conversion (Fail-Safe)
+    # 4. Processing
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
+    if 'Item' not in df.columns: df['Item'] = "General Item"
     
-    if 'Item' not in df.columns:
-        df['Item'] = "General Item"
-    else:
-        df['Item'] = df['Item'].fillna("Unknown")
-
-    # 5. Analysis Logic (RFM)
+    # 5. RFM Analysis
     snapshot_date = df['Date'].max()
-    
-    # Safe Mode Calculation
     rfm = df.groupby('Customer').agg({
         'Date': lambda x: (snapshot_date - x.max()).days,
         'Customer': 'count',
@@ -196,12 +207,12 @@ def process_data(df):
         'Item': lambda x: x.mode()[0] if not x.mode().empty else "Mix"
     }).rename(columns={'Date': 'Days_Silent', 'Customer': 'Orders', 'Amount': 'Total_Spent', 'Item': 'Top_Item'})
     
-    # 6. Risk Rules
+    # 6. Risk Scoring
     def get_risk(row):
         if row['Days_Silent'] > 90: return 'High Risk'
         elif row['Days_Silent'] > 45: return 'Medium Risk'
         else: return 'Safe'
-        
+    
     rfm['Status'] = rfm.apply(get_risk, axis=1)
     return rfm.reset_index(), None
 
@@ -210,26 +221,23 @@ def generate_excel(df_risk):
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     worksheet = workbook.add_worksheet()
 
-    # Formats
-    header_fmt = workbook.add_format({'bold': True, 'bg_color': '#4B4BFF', 'font_color': 'white', 'border': 1})
-    money_fmt = workbook.add_format({'num_format': '₹#,##0', 'border': 1})
-    cell_fmt = workbook.add_format({'border': 1})
+    # Formats (Blue Header, Money with Rupee)
+    header_fmt = workbook.add_format({'bold': True, 'bg_color': '#4B4BFF', 'font_color': 'white'})
+    money_fmt = workbook.add_format({'num_format': '[$₹-4009]#,##0'}) # Native Excel Rupee Format
     
-    # Headers
+    # Write Headers
     headers = ['Customer', 'Days Silent', 'Total Spent', 'Top Item', 'Status']
-    for col, header in enumerate(headers):
-        worksheet.write(0, col, header, header_fmt)
+    for col, h in enumerate(headers):
+        worksheet.write(0, col, h, header_fmt)
         
-    # Data
-    row = 1
-    for _, data in df_risk.iterrows():
-        if data['Status'] != 'Safe':
-            worksheet.write(row, 0, data['Customer'], cell_fmt)
-            worksheet.write(row, 1, data['Days_Silent'], cell_fmt)
-            worksheet.write(row, 2, data['Total_Spent'], money_fmt) # Native Rupee Support
-            worksheet.write(row, 3, data['Top_Item'], cell_fmt)
-            worksheet.write(row, 4, data['Status'], cell_fmt)
-            row += 1
+    # Write Data
+    for row, data in enumerate(df_risk.itertuples(), 1):
+        if data.Status != 'Safe':
+            worksheet.write(row, 0, data.Customer)
+            worksheet.write(row, 1, data.Days_Silent)
+            worksheet.write(row, 2, data.Total_Spent, money_fmt)
+            worksheet.write(row, 3, data.Top_Item)
+            worksheet.write(row, 4, data.Status)
             
     workbook.close()
     return output.getvalue()
@@ -328,14 +336,15 @@ def render_dashboard():
             st.dataframe(display_df, hide_index=True)
                     
             # PDF Download
-            # Excel Download (Replaces PDF)
+            # Generate Excel
             excel_data = generate_excel(risk_df)
+                
             st.download_button(
-                    "⬇️ Download Risk Report (Excel)", 
-                    data=excel_data, 
-                    file_name="Risk_Report.xlsx", 
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )  
+                label="⬇️ Download Risk Report (Excel)",
+                data=excel_data,
+                file_name="Risk_Report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ) 
             
 def render_ai_consultant():
     st.header("🤖 AI Retention Specialist")
