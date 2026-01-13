@@ -193,7 +193,6 @@ def process_data(df):
     rfm['Status'] = rfm.apply(get_risk, axis=1)
     return rfm.reset_index(), None
 
-# --- PDF GENERATION ---
 def generate_pdf(df_risk):
     pdf = FPDF()
     pdf.add_page()
@@ -202,22 +201,29 @@ def generate_pdf(df_risk):
     pdf.ln(10)
     
     pdf.set_font("Arial", 'B', 10)
+    # Header
     pdf.cell(55, 10, "Customer", 1)
     pdf.cell(25, 10, "Days Silent", 1)
-    pdf.cell(40, 10, "Total (Rs.)", 1)
+    pdf.cell(40, 10, "Total (Rs.)", 1) # Changed to Rs. to prevent crash
     pdf.cell(40, 10, "Top Item", 1)
     pdf.cell(30, 10, "Status", 1)
     pdf.ln()
     
     pdf.set_font("Arial", '', 9)
+    # Rows
     for _, row in df_risk.iterrows():
         if row['Status'] != "Safe":
-            pdf.cell(55, 10, str(row['Customer'])[:25], 1)
+            # Clean text to avoid unicode errors
+            cust_name = str(row['Customer'])[:25].encode('latin-1', 'replace').decode('latin-1')
+            item_name = str(row['Top_Item'])[:20].encode('latin-1', 'replace').decode('latin-1')
+            
+            pdf.cell(55, 10, cust_name, 1)
             pdf.cell(25, 10, str(row['Days_Silent']), 1)
             pdf.cell(40, 10, f"{row['Total_Spent']:.0f}", 1)
-            pdf.cell(40, 10, str(row['Top_Item'])[:20], 1)
+            pdf.cell(40, 10, item_name, 1)
             pdf.cell(30, 10, row['Status'], 1)
             pdf.ln()
+            
     return pdf.output(dest='S').encode('latin-1', 'ignore')
 
 # ==========================================
