@@ -253,4 +253,4 @@ with tab2:
                             messages=[{"role": "user", "content": prompt}],
                             temperature=0.7
                         )
-                        st.markdown(completion.choices[0].message.content)
+                        st.markdown(completion.choices[0].message.content) 
