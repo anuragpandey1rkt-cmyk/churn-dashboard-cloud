@@ -255,29 +255,6 @@ def generate_pdf(df_risk):
 # 4. FEATURE RENDERERS
 # ==========================================
 
-def calculate_ltv(total_spent, orders, lifespan_months=12):
-    """
-    Simple predictive LTV model
-    """
-    try:
-        avg_order_value = total_spent / max(orders, 1)
-        purchase_frequency = orders / max(lifespan_months, 1)
-        ltv = avg_order_value * purchase_frequency * lifespan_months
-        return round(ltv, 0)
-    except:
-        return total_spent
-        
-def retention_playbook(days_silent, total_spent):
-    if days_silent > 120 and total_spent > 50000:
-        return "High-value churn risk → Personal call + premium offer"
-    elif days_silent > 90:
-        return "Strong discount + urgency-based email"
-    elif days_silent > 45:
-        return "Reminder email + product recommendation"
-    else:
-        return "Loyal customer → Reward with loyalty points"
-
-
 def render_login_page():
     st.markdown("<h1 style='text-align: center;'>🧠 RetainIQ Pro</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center;'>Intelligent Customer Retention System</p>", unsafe_allow_html=True)
@@ -304,9 +281,6 @@ def render_login_page():
                     signup_user(new_email, new_pass, new_name)
                 else:
                     st.warning("Please fill all fields")
-
-def risk_summary(df):
-    return df['Status'].value_counts().to_dict()
 
 def render_dashboard():
     st.header("📊 Transaction Analyzer")
@@ -347,11 +321,7 @@ def render_dashboard():
         m3.metric("💰 Total Revenue", f"₹{total_rev:,.0f}")
         avg_val = risk_df['Total_Spent'].mean()
         m4.metric("Avg Spend", f"₹{avg_val:,.0f}")
-        summary = risk_summary(risk_df)
-        st.caption(f"High Risk: {summary.get('High Risk', 0)} | "
-                   f"Medium Risk: {summary.get('Medium Risk', 0)} | "
-                   f"Safe: {summary.get('Safe', 0)}")
-
+        
         st.divider()
         
         # Charts & Data
@@ -380,9 +350,7 @@ def render_dashboard():
             
 def render_ai_consultant():
     st.header("🤖 AI Retention Specialist")
-    recommendation = retention_playbook(c_days, cust_data['Total_Spent'])
-    st.info(f"📌 System Recommendation: {recommendation}")
-
+    
     if st.session_state.risk_df is None:
         st.warning("⚠️ Please go to the Dashboard and upload data first.")
         return
@@ -408,9 +376,7 @@ def render_ai_consultant():
         c_days = cust_data['Days_Silent']
         c_val = f"{cust_data['Total_Spent']:,.0f}"
         c_item = str(cust_data['Top_Item']) # Force string to prevent crashes
-        c_orders = cust_data['Orders']
-        c_ltv = calculate_ltv(cust_data['Total_Spent'], c_orders)
-
+        
         st.markdown(f"""
         <div style='background-color:#f0f2f6; padding:15px; border-radius:10px;'>
             <h4>{sel_cust}</h4>
@@ -418,7 +384,6 @@ def render_ai_consultant():
             <p><b>Silent:</b> {c_days} days</p>
             <p><b>Value:</b> ₹{c_val}</p>
             <p><b>Loves:</b> {c_item}</p>
-            <p><b>Estimated LTV:</b> ₹{c_ltv:,.0f}</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -444,13 +409,8 @@ def render_ai_consultant():
                         """
                         
                         res = groq_client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
-                        messages=[
-                        {"role": "system", "content": "You are a senior CRM retention strategist."},
-                        {"role": "user", "content": prompt}
-                        ],
-                        temperature=0.3,
-                        max_tokens=600
+                            model="llama-3.1-8b-instant",
+                            messages=[{"role": "user", "content": prompt}]
                         )
                         st.success("Strategy Generated:")
                         st.markdown(res.choices[0].message.content)
