@@ -402,7 +402,7 @@ def render_ai_consultant():
                         
                         Customer Data:
                         - Absent: {c_days} days.
-                        - Value: {c_spend} INR.
+                        - Value: {c_val} INR.
                         - Favorite: {c_item}.
                         
                         Output:
