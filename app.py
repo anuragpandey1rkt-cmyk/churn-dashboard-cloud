@@ -168,10 +168,9 @@ def process_data(df):
         'SalesAmount': 'Amount', 
         'Product': 'Item'
     }
-    # Rename columns if they exist
     df = df.rename(columns=col_map)
     
-    # 3. Validation: Check if renaming worked
+    # 3. Validation
     required = ['Date', 'Customer', 'Amount']
     missing = [col for col in required if col not in df.columns]
     if missing:
@@ -181,18 +180,27 @@ def process_data(df):
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
     
-    # Fill missing Item column if it doesn't exist (fail-safe)
+    # Fail-safe for Product column
     if 'Item' not in df.columns:
         df['Item'] = "General Item"
+    else:
+        df['Item'] = df['Item'].fillna("Unknown Product")
 
     # 5. RFM Calculation
     snapshot_date = df['Date'].max()
     
+    # Safe Mode function for finding top item
+    def get_mode_item(x):
+        try:
+            return str(x.mode().iloc[0]) # Force to string
+        except:
+            return "General Item"
+
     rfm = df.groupby('Customer').agg({
         'Date': lambda x: (snapshot_date - x.max()).days,
         'Customer': 'count',
         'Amount': 'sum',
-        'Item': lambda x: x.mode()[0] if not x.mode().empty else "Unknown"
+        'Item': get_mode_item
     }).rename(columns={'Date': 'Days_Silent', 'Customer': 'Orders', 'Amount': 'Total_Spent', 'Item': 'Top_Item'})
     
     # 6. Risk Scoring
@@ -203,7 +211,6 @@ def process_data(df):
         
     rfm['Status'] = rfm.apply(get_risk, axis=1)
     return rfm.reset_index(), None
-
 
 def generate_pdf(df_risk):
     # PDF Generator - SAFE MODE
@@ -349,6 +356,7 @@ def render_ai_consultant():
         return
 
     risk_df = st.session_state.risk_df
+    # Filter for risks
     risky_custs = risk_df[risk_df['Status'].str.contains('Risk')]
     
     if risky_custs.empty:
@@ -360,15 +368,22 @@ def render_ai_consultant():
     with col1:
         st.subheader("Select Customer")
         sel_cust = st.selectbox("Choose Customer", risky_custs['Customer'].unique())
+        
+        # Get Data Safely
         cust_data = risky_custs[risky_custs['Customer'] == sel_cust].iloc[0]
+        
+        # Safe variables for Display & AI
+        c_days = cust_data['Days_Silent']
+        c_val = f"{cust_data['Total_Spent']:,.0f}"
+        c_item = str(cust_data['Top_Item']) # Force string to prevent crashes
         
         st.markdown(f"""
         <div style='background-color:#f0f2f6; padding:15px; border-radius:10px;'>
             <h4>{sel_cust}</h4>
             <p><b>Status:</b> {cust_data['Status']}</p>
-            <p><b>Silent:</b> {cust_data['Days_Silent']} days</p>
-            <p><b>Value:</b> ₹{cust_data['Total_Spent']:,.0f}</p>
-            <p><b>Loves:</b> {cust_data['Top_Item']}</p>
+            <p><b>Silent:</b> {c_days} days</p>
+            <p><b>Value:</b> ₹{c_val}</p>
+            <p><b>Loves:</b> {c_item}</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -381,18 +396,18 @@ def render_ai_consultant():
                 st.error("AI Key Missing in Secrets")
             else:
                 with st.spinner("Consulting AI..."):
-                    prompt = f"""
-                    You are a Retention Expert.
-                    Customer: {sel_cust}
-                    Silent for: {cust_data['Days_Silent']} days.
-                    Total Spend: ₹{cust_data['Total_Spent']}.
-                    Favorite Item: {cust_data['Top_Item']}.
-                    
-                    Task: {action}.
-                    Keep it professional, concise, and use Rupees (₹).
-                    """
-                    
                     try:
+                        prompt = f"""
+                        You are a Retention Expert.
+                        Customer: {sel_cust}
+                        Silent for: {c_days} days.
+                        Total Spend: ₹{c_val}.
+                        Favorite Item: {c_item}.
+                        
+                        Task: {action}.
+                        Keep it professional, concise, and use Rupees (₹).
+                        """
+                        
                         res = groq_client.chat.completions.create(
                             model="llama3-8b-8192",
                             messages=[{"role": "user", "content": prompt}]
