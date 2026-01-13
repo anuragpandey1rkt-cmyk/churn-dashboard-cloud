@@ -4,11 +4,10 @@ import psycopg2
 import plotly.express as px
 from groq import Groq
 import io
-from fpdf import FPDF
 import hashlib
 import time
 import datetime
-import xlsxwriter 
+import xlsxwriter
 
 # ==========================================
 # 1. CONFIGURATION & INIT
@@ -30,15 +29,18 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Load Secrets
+# Load Secrets safely
 try:
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", None)
 except:
     GROQ_API_KEY = None
 
 # Initialize AI Client
 try:
-    groq_client = Groq(api_key=GROQ_API_KEY)
+    if GROQ_API_KEY:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+    else:
+        groq_client = None
 except:
     groq_client = None
 
@@ -106,7 +108,7 @@ def hash_password(password):
 def login_user(email, password):
     conn = get_db_connection()
     if not conn:
-        st.error("Database Connection Failed")
+        st.error("❌ Database Connection Failed. Check Secrets.")
         return
 
     try:
@@ -134,7 +136,7 @@ def login_user(email, password):
 def signup_user(email, password, name):
     conn = get_db_connection()
     if not conn:
-        st.error("Database Connection Failed")
+        st.error("❌ Database Connection Failed. Check Secrets.")
         return
 
     try:
@@ -145,7 +147,7 @@ def signup_user(email, password, name):
         )
         conn.commit()
         conn.close()
-        st.success("Account Created! Please Login.")
+        st.success("✅ Account Created! Please Login.")
     except psycopg2.errors.UniqueViolation:
         st.error("Email already exists.")
     except Exception as e:
@@ -157,30 +159,31 @@ def logout_user():
     st.session_state.risk_df = None
     st.rerun()
 
-# --- CORE BUSINESS LOGIC (RFM Analysis) ---
+# --- CORE BUSINESS LOGIC (Smart RFM Analysis) ---
 def process_data(df):
     # 1. Clean Headers (Remove spaces)
     df.columns = df.columns.str.strip()
     
     # 2. Smart Column Search
-    # We look for columns containing keywords like "Date" or "Amount"
+    # Matches: OrderDate/Date, CustomerName/Customer, SalesAmount/Amount
     col_map = {}
     
-    # Find Date Column
-    date_cols = [c for c in df.columns if "Date" in c or "date" in c]
-    col_map[date_cols[0]] = 'Date' if date_cols else None
-    
-    # Find Customer Column
-    cust_cols = [c for c in df.columns if "Customer" in c or "Name" in c]
-    col_map[cust_cols[0]] = 'Customer' if cust_cols else None
-    
-    # Find Amount Column
-    amt_cols = [c for c in df.columns if "Amount" in c or "Sales" in c or "Price" in c]
-    col_map[amt_cols[0]] = 'Amount' if amt_cols else None
-    
-    # Find Product Column
-    prod_cols = [c for c in df.columns if "Product" in c or "Item" in c]
-    col_map[prod_cols[0]] = 'Item' if prod_cols else None
+    # Helper to find column containing a keyword
+    def find_col(keywords):
+        for col in df.columns:
+            for kw in keywords:
+                if kw.lower() in col.lower():
+                    return col
+        return None
+
+    # Find Columns
+    col_map[find_col(['OrderDate', 'Date', 'Time'])] = 'Date'
+    col_map[find_col(['Customer', 'Name', 'Client'])] = 'Customer'
+    col_map[find_col(['Sales', 'Amount', 'Price', 'Value'])] = 'Amount'
+    col_map[find_col(['Product', 'Item', 'SKU'])] = 'Item'
+
+    # Remove None values from map
+    col_map = {k: v for k, v in col_map.items() if k is not None}
 
     # Rename
     df = df.rename(columns=col_map)
@@ -190,16 +193,24 @@ def process_data(df):
     missing = [col for col in required if col not in df.columns]
     
     if missing:
-        # Debug Message: Shows user exactly what columns were found
-        return None, f"⚠️ Error! Found columns: {list(df.columns)}. Missing: {missing}"
+        return None, f"⚠️ Column Error! We found: {list(df.columns)}. We need: {required}"
         
-    # 4. Processing
+    # 4. Processing (Fail-Safe)
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
-    if 'Item' not in df.columns: df['Item'] = "General Item"
     
+    if 'Item' not in df.columns:
+        df['Item'] = "General Item"
+    else:
+        df['Item'] = df['Item'].fillna("Unknown")
+
     # 5. RFM Analysis
+    if df['Date'].isna().all():
+         return None, "⚠️ Error: Date column parsing failed. Check date format."
+
     snapshot_date = df['Date'].max()
+    
+    # Safe Mode Aggregation
     rfm = df.groupby('Customer').agg({
         'Date': lambda x: (snapshot_date - x.max()).days,
         'Customer': 'count',
@@ -217,13 +228,14 @@ def process_data(df):
     return rfm.reset_index(), None
 
 def generate_excel(df_risk):
+    # Crash-Proof Excel Generator
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     worksheet = workbook.add_worksheet()
 
-    # Formats (Blue Header, Money with Rupee)
+    # Formats
     header_fmt = workbook.add_format({'bold': True, 'bg_color': '#4B4BFF', 'font_color': 'white'})
-    money_fmt = workbook.add_format({'num_format': '[$₹-4009]#,##0'}) # Native Excel Rupee Format
+    money_fmt = workbook.add_format({'num_format': '[$₹-4009]#,##0'}) # Native Excel Rupee Support
     
     # Write Headers
     headers = ['Customer', 'Days Silent', 'Total Spent', 'Top Item', 'Status']
@@ -295,7 +307,7 @@ def render_dashboard():
                 # Store in Session State
                 st.session_state.risk_df = risk_df
                 st.session_state.analysis_date = datetime.date.today()
-                st.success("Analysis Complete!")
+                st.success("✅ Analysis Complete!")
         except Exception as e:
             st.error(f"File Error: {e}")
 
@@ -322,20 +334,20 @@ def render_dashboard():
             fig = px.scatter(risk_df, x="Days_Silent", y="Total_Spent",
                                 color="Status", size="Total_Spent",
                                 hover_data=['Customer', 'Top_Item'],
-                                color_discrete_map={'High Risk':'red', 'Medium Risk':'orange', 'Safe':'green'})
+                                color_discrete_map={'High Risk':'red', 'Medium Risk':'orange', 'Safe':'green'},
+                                labels={'Total_Spent': 'Total Spend (₹)', 'Days_Silent': 'Days Since Last Order'})
             st.plotly_chart(fig, use_container_width=True)
             
         with c2:
             st.subheader("📋 Risk Report")
             # Display Table
             display_df = risk_df[risk_df['Status'].str.contains('Risk')][['Customer', 'Top_Item', 'Total_Spent', 'Status']].sort_values('Total_Spent', ascending=False)
-                    
+            
             # Add Rupee Symbol for Display Only
             display_df['Total_Spent'] = display_df['Total_Spent'].apply(lambda x: f"₹{x:,.0f}")
-                    
+            
             st.dataframe(display_df, hide_index=True)
-                    
-            # PDF Download
+            
             # Generate Excel
             excel_data = generate_excel(risk_df)
                 
@@ -391,7 +403,7 @@ def render_ai_consultant():
         
         if st.button("✨ Ask AI", use_container_width=True):
             if not groq_client:
-                st.error("AI Key Missing in Secrets")
+                st.error("❌ AI Key Missing in Secrets. Please add GROQ_API_KEY.")
             else:
                 with st.spinner("Consulting AI..."):
                     try:
@@ -404,6 +416,8 @@ def render_ai_consultant():
                         - Absent: {c_days} days.
                         - Value: {c_val} INR.
                         - Favorite: {c_item}.
+                        
+                        Action Required: {action}
                         
                         Output:
                         1. Diagnosis (1 sentence).
