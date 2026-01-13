@@ -158,24 +158,34 @@ def logout_user():
 
 # --- CORE BUSINESS LOGIC (RFM Analysis) ---
 def process_data(df):
-    # Standardize Columns
+    # 1. Clean Headers
     df.columns = df.columns.str.strip()
+    
+    # 2. Map Columns (Matches your uploaded file EXACTLY)
     col_map = {
-        'OrderDate': 'Date', 'date': 'Date',
-        'CustomerName': 'Customer', 'Customer': 'Customer', 
-        'SalesAmount': 'Amount', 'Sales': 'Amount', 'Amount': 'Amount',
-        'Product': 'Item', 'ProductName': 'Item', 'Item': 'Item'
+        'OrderDate': 'Date', 
+        'CustomerName': 'Customer', 
+        'SalesAmount': 'Amount', 
+        'Product': 'Item'
     }
+    # Rename columns if they exist
     df = df.rename(columns=col_map)
     
+    # 3. Validation: Check if renaming worked
     required = ['Date', 'Customer', 'Amount']
-    if not all(col in df.columns for col in required):
-        return None, f"Missing columns. Found: {list(df.columns)}"
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        return None, f"Missing columns: {missing}. Please check your file."
         
+    # 4. Processing
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
-    if 'Item' not in df.columns: df['Item'] = "General Item"
+    
+    # Fill missing Item column if it doesn't exist (fail-safe)
+    if 'Item' not in df.columns:
+        df['Item'] = "General Item"
 
+    # 5. RFM Calculation
     snapshot_date = df['Date'].max()
     
     rfm = df.groupby('Customer').agg({
@@ -185,6 +195,7 @@ def process_data(df):
         'Item': lambda x: x.mode()[0] if not x.mode().empty else "Unknown"
     }).rename(columns={'Date': 'Days_Silent', 'Customer': 'Orders', 'Amount': 'Total_Spent', 'Item': 'Top_Item'})
     
+    # 6. Risk Scoring
     def get_risk(row):
         if row['Days_Silent'] > 90: return 'High Risk'
         elif row['Days_Silent'] > 45: return 'Medium Risk'
@@ -193,7 +204,9 @@ def process_data(df):
     rfm['Status'] = rfm.apply(get_risk, axis=1)
     return rfm.reset_index(), None
 
+
 def generate_pdf(df_risk):
+    # PDF Generator - SAFE MODE
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
@@ -204,7 +217,7 @@ def generate_pdf(df_risk):
     # Header
     pdf.cell(55, 10, "Customer", 1)
     pdf.cell(25, 10, "Days Silent", 1)
-    pdf.cell(40, 10, "Total (Rs.)", 1) # Changed to Rs. to prevent crash
+    pdf.cell(40, 10, "Total (Rs.)", 1) # Use Rs. to avoid crash
     pdf.cell(40, 10, "Top Item", 1)
     pdf.cell(30, 10, "Status", 1)
     pdf.ln()
@@ -213,19 +226,24 @@ def generate_pdf(df_risk):
     # Rows
     for _, row in df_risk.iterrows():
         if row['Status'] != "Safe":
-            # Clean text to avoid unicode errors
+            # 1. Clean Customer Name (Remove emojis/weird chars)
             cust_name = str(row['Customer'])[:25].encode('latin-1', 'replace').decode('latin-1')
+            
+            # 2. Clean Item Name
             item_name = str(row['Top_Item'])[:20].encode('latin-1', 'replace').decode('latin-1')
+            
+            # 3. Format Money (No symbol, just numbers)
+            money_str = f"{row['Total_Spent']:.0f}"
             
             pdf.cell(55, 10, cust_name, 1)
             pdf.cell(25, 10, str(row['Days_Silent']), 1)
-            pdf.cell(40, 10, f"{row['Total_Spent']:.0f}", 1)
+            pdf.cell(40, 10, money_str, 1)
             pdf.cell(40, 10, item_name, 1)
             pdf.cell(30, 10, row['Status'], 1)
             pdf.ln()
             
     return pdf.output(dest='S').encode('latin-1', 'ignore')
-
+    
 # ==========================================
 # 4. FEATURE RENDERERS
 # ==========================================
@@ -310,14 +328,19 @@ def render_dashboard():
             st.plotly_chart(fig, use_container_width=True)
             
         with c2:
-            st.subheader("📋 Action List")
-            display_df = risk_df[risk_df['Status'].str.contains('Risk')][['Customer', 'Top_Item', 'Total_Spent', 'Status']]
+            st.subheader("📋 Risk Report")
+            # Display Table
+            display_df = risk_df[risk_df['Status'].str.contains('Risk')][['Customer', 'Top_Item', 'Total_Spent', 'Status']].sort_values('Total_Spent', ascending=False)
+                    
+            # Add Rupee Symbol for Display Only
             display_df['Total_Spent'] = display_df['Total_Spent'].apply(lambda x: f"₹{x:,.0f}")
+                    
             st.dataframe(display_df, hide_index=True)
-            
+                    
+            # PDF Download
             pdf_data = generate_pdf(risk_df)
-            st.download_button("⬇️ Download Report (PDF)", data=pdf_data, file_name="Risk_Report.pdf", mime="application/pdf", use_container_width=True)
-
+            st.download_button("⬇️ Download PDF Report", data=pdf_data, file_name="Risk_Report.pdf", mime="application/pdf")
+            
 def render_ai_consultant():
     st.header("🤖 AI Retention Specialist")
     
