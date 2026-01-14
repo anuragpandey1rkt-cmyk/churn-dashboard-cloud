@@ -378,6 +378,7 @@ def render_ai():
     st.title("🤖 AI Retention Consultant")
     st.markdown("Generate personalized win-back strategies for high-risk customers.")
     
+    # 1. Check for Data
     if st.session_state.churn_df is None:
         st.warning("Upload data in the Dashboard first.")
         return
@@ -390,7 +391,9 @@ def render_ai():
         st.success("No High-Risk customers found! Retention is healthy.")
         return
 
+    # 2. Top Section: Customer Selection & Strategy Generator
     c1, c2 = st.columns([1, 2])
+    
     with c1:
         st.subheader("Select Customer")
         sel = st.selectbox("High-Value At Risk", targets['Customer'])
@@ -409,68 +412,71 @@ def render_ai():
         action = st.radio("Intervention Type", ["🎁 Win-Back Offer", "💬 Feedback Request", "📦 Product Bundle"])
         
         if st.button("✨ Generate Strategy"):
-            if not groq_client: st.error("AI API Key Missing in Secrets"); return
-            
-            with st.spinner("Analyzing churn vectors..."):
-                prompt = f"""
-                You are a Retention Expert.
-                Customer: {sel}
-                Stage: {data['Lifecycle_Stage']} (Inactive {data['Recency']} days).
-                Value: ₹{data['LTV']}.
-                Favorite Product: {data['Fav_Product']}.
-                Risk Score: {data['Churn_Risk_Score']}/100.
-                
-                Goal: Prevent churn using '{action}'.
-                
-                Output:
-                1. **Diagnosis**: Why are they at risk? (Based on inactivity/habit).
-                2. **Offer**: A specific financial or value-based incentive.
-                3. **Communication**: A short, empathetic email draft.
-                """
-                try:
-                    res = groq_client.chat.completions.create(
-                        model="llama-3.1-8b-instant", messages=[{"role": "user", "content": prompt}]
-                    )
-                    st.success("Strategic Recommendation:")
-                    st.markdown(res.choices[0].message.content)
-                except Exception as e:
-                    st.error(f"AI Error: {e}")
+            if not groq_client: 
+                st.error("AI API Key Missing in Secrets")
+            else:
+                with st.spinner("Analyzing churn vectors..."):
+                    prompt_strategy = f"""
+                    You are a Retention Expert.
+                    Customer: {sel}
+                    Stage: {data['Lifecycle_Stage']} (Inactive {data['Recency']} days).
+                    Value: ₹{data['LTV']}.
+                    Favorite Product: {data['Fav_Product']}.
+                    Risk Score: {data['Churn_Risk_Score']}/100.
+                    
+                    Goal: Prevent churn using '{action}'.
+                    
+                    Output:
+                    1. **Diagnosis**: Why are they at risk? (Based on inactivity/habit).
+                    2. **Offer**: A specific financial or value-based incentive.
+                    3. **Communication**: A short, empathetic email draft.
+                    """
+                    try:
+                        res = groq_client.chat.completions.create(
+                            model="llama-3.1-8b-instant", messages=[{"role": "user", "content": prompt_strategy}]
+                        )
+                        st.success("Strategic Recommendation:")
+                        st.markdown(res.choices[0].message.content)
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
+
     # ==========================================
-    # NEW: CONVERSATIONAL CHAT INTERFACE
+    # 3. CHAT INTERFACE (OUTSIDE COLUMNS & BUTTONS)
     # ==========================================
+    # This must be dedented to the main function level
+    
     st.divider()
     st.subheader(f"💬 Chat about {sel}")
     st.caption("Ask follow-up questions to refine your retention strategy.")
 
-    # 1. Initialize Chat History (Specific to this module)
+    # Initialize Chat History
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # 2. Reset Chat if Customer Changes (Optional but recommended)
+    # Reset Chat if Customer Changes
     if "last_selected_cust" not in st.session_state or st.session_state.last_selected_cust != sel:
         st.session_state.messages = []
         st.session_state.last_selected_cust = sel
 
-    # 3. Display Chat History
+    # Display History
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # 4. Handle New User Input
-    if prompt := st.chat_input(f"Ask AI about {sel}..."):
+    # Handle Input
+    # Note: Using a different variable name 'chat_input' to avoid conflict with strategy 'prompt'
+    if chat_input := st.chat_input(f"Ask about {sel}..."):
         # Display User Message
-        st.session_state.messages.append({"role": "user", "content": prompt})
+        st.session_state.messages.append({"role": "user", "content": chat_input})
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(chat_input)
 
         # Generate AI Response
         with st.chat_message("assistant"):
             if not groq_client:
                 st.error("AI Key Missing")
-                response_text = "Error: No API Key"
             else:
                 try:
-                    # Context-Aware System Prompt
                     system_context = f"""
                     You are a Senior Retention Specialist.
                     Focus Customer: {sel}
@@ -480,12 +486,12 @@ def render_ai():
                     - Favorite Product: {data['Fav_Product']}
                     - Risk Score: {data['Churn_Risk_Score']}/100
                     
-                    Answer the user's question specifically about this customer. 
+                    Answer the user's question specifically about this customer.
                     Keep answers concise, professional, and actionable.
                     """
                     
                     stream = groq_client.chat.completions.create(
-                        model="llama-3.1-8b-instant", # Using the new, faster model
+                        model="llama-3.1-8b-instant",
                         messages=[
                             {"role": "system", "content": system_context},
                             *st.session_state.messages
@@ -493,8 +499,6 @@ def render_ai():
                         stream=True
                     )
                     response_text = st.write_stream(stream)
-                    
-                    # Save AI Response
                     st.session_state.messages.append({"role": "assistant", "content": response_text})
                     
                 except Exception as e:
