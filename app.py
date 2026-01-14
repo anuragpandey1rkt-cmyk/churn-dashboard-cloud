@@ -98,7 +98,32 @@ def login_user(email, password):
         st.error(f"Login Error: {e}")
         if conn: conn.close()
             
-
+def signup_user(email, password, name):
+    conn = get_db_connection()
+    if not conn:
+        st.error("Database unavailable. Use demo credentials.")
+        return
+    try:
+        cur = conn.cursor()
+        # Create table if it doesn't exist (Safety check)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                email VARCHAR(255) PRIMARY KEY, 
+                password_hash VARCHAR(255), 
+                name VARCHAR(100)
+            );
+        """)
+        # Insert new user
+        cur.execute(
+            "INSERT INTO users (email, password_hash, name) VALUES (%s, %s, %s)",
+            (email, hash_password(password), name)
+        )
+        conn.commit()
+        conn.close()
+        st.success("✅ Account Created! Please go to the Login tab.")
+    except Exception as e:
+        st.error(f"Signup Error: {e} (Email might already exist)")
+        
 def logout_user():
     st.session_state.clear()
     st.rerun()
