@@ -4,40 +4,48 @@ import psycopg2
 import plotly.express as px
 from groq import Groq
 import io
-from fpdf import FPDF
 import hashlib
 import time
 import datetime
+from fpdf import FPDF
 
 # ==========================================
 # 1. CONFIGURATION & INIT
 # ==========================================
 st.set_page_config(
-    page_title="RetainIQ Pro",
-    page_icon="🧠",
+    page_title="RetainIQ: Churn Analysis",
+    page_icon="📉",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Professional Look
+# Custom CSS for Professional Dashboard Look
 st.markdown("""
     <style>
-    .metric-card {background-color: #f0f2f6; border-radius: 10px; padding: 15px; border-left: 5px solid #4B4BFF;}
-    .risk-high {color: #FF4B4B; font-weight: bold;}
-    .risk-safe {color: #2E8B57; font-weight: bold;}
-    .block-container {padding-top: 2rem; padding-bottom: 5rem;}
+    .metric-card {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .stMetric {
+        background-color: #f9f9f9;
+        padding: 10px;
+        border-radius: 5px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # Load Secrets
 try:
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
 except:
     GROQ_API_KEY = None
 
 # Initialize AI Client
 try:
-    groq_client = Groq(api_key=GROQ_API_KEY)
+    groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 except:
     groq_client = None
 
@@ -46,12 +54,12 @@ except:
 # ==========================================
 def init_session_state():
     defaults = {
-        "user": None,          # Stores user email/id
-        "user_name": None,     # Stores user display name
-        "logged_in": False,    # Auth status
-        "feature": "📊 Dashboard", # Current active page
-        "risk_df": None,       # Stores analyzed data
-        "analysis_date": None  # Stores date of analysis
+        "user": None,
+        "user_name": None,
+        "logged_in": False,
+        "feature": "📊 Churn Dashboard",
+        "risk_df": None,
+        "analysis_date": None
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -59,15 +67,13 @@ def init_session_state():
 
 init_session_state()
 
-# Navigation Helper
 def go_to(page):
     st.session_state.feature = page
 
 # ==========================================
-# 3. BACKEND HELPERS (Auth, DB, Logic)
+# 3. BACKEND HELPERS (Auth & DB)
 # ==========================================
 
-# --- DATABASE CONNECTION ---
 def get_db_connection():
     try:
         return psycopg2.connect(
@@ -76,10 +82,9 @@ def get_db_connection():
             user=st.secrets["DB_USER"],
             password=st.secrets["DB_PASS"]
         )
-    except Exception as e:
+    except:
         return None
 
-# --- AUTHENTICATION (SQL Based) ---
 def init_auth_db():
     conn = get_db_connection()
     if conn:
@@ -97,7 +102,7 @@ def init_auth_db():
         except:
             pass
 
-init_auth_db() # Run once on startup
+init_auth_db()
 
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
@@ -105,7 +110,7 @@ def hash_password(password):
 def login_user(email, password):
     conn = get_db_connection()
     if not conn:
-        st.error("Database Connection Failed")
+        st.error("Database Connection Failed (Check Secrets)")
         return
 
     try:
@@ -120,11 +125,11 @@ def login_user(email, password):
                 st.session_state.user = email
                 st.session_state.user_name = name
                 st.session_state.logged_in = True
-                st.success(f"Welcome back, {name}!")
-                time.sleep(1)
+                st.success(f"Login Successful! Welcome {name}.")
+                time.sleep(0.5)
                 st.rerun()
             else:
-                st.error("Incorrect Password")
+                st.error("Invalid Password")
         else:
             st.error("User not found")
     except Exception as e:
@@ -135,20 +140,15 @@ def signup_user(email, password, name):
     if not conn:
         st.error("Database Connection Failed")
         return
-
     try:
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO users (email, password_hash, name) VALUES (%s, %s, %s)",
-            (email, hash_password(password), name)
-        )
+        cur.execute("INSERT INTO users (email, password_hash, name) VALUES (%s, %s, %s)",
+                    (email, hash_password(password), name))
         conn.commit()
         conn.close()
         st.success("Account Created! Please Login.")
-    except psycopg2.errors.UniqueViolation:
-        st.error("Email already exists.")
-    except Exception as e:
-        st.error(f"Signup Error: {e}")
+    except:
+        st.error("Email already exists or DB error.")
 
 def logout_user():
     st.session_state.user = None
@@ -156,146 +156,147 @@ def logout_user():
     st.session_state.risk_df = None
     st.rerun()
 
-# --- CORE BUSINESS LOGIC (RFM Analysis) ---
-def process_data(df):
-    # 1. Clean Headers
-    df.columns = df.columns.str.strip()
+# ==========================================
+# 4. CORE CHURN LOGIC (The "Brain")
+# ==========================================
+
+def calculate_churn_metrics(df):
+    """
+    This function converts raw transactions into Behavioral Churn Metrics.
+    Logic:
+    1. Recency: How long since last buy?
+    2. Frequency: How often do they buy?
+    3. Monetary: How much do they spend?
+    4. Churn Classification: Based on inactivity thresholds.
+    """
     
-    # 2. Map Columns (Matches your uploaded file EXACTLY)
+    # 1. Clean & Map Columns
+    df.columns = df.columns.str.strip()
     col_map = {
-        'OrderDate': 'Date', 
-        'CustomerName': 'Customer', 
-        'SalesAmount': 'Amount', 
-        'Product': 'Item'
+        'OrderDate': 'Date', 'CustomerName': 'Customer', 
+        'SalesAmount': 'Amount', 'Product': 'Item'
     }
+    # Fail-safe mapping if user uploads variations
+    for col in df.columns:
+        if 'Date' in col: col_map[col] = 'Date'
+        if 'Name' in col or 'Customer' in col: col_map[col] = 'Customer'
+        if 'Amount' in col or 'Sales' in col: col_map[col] = 'Amount'
+        if 'Product' in col or 'Item' in col: col_map[col] = 'Item'
+        
     df = df.rename(columns=col_map)
     
-    # 3. Validation
-    required = ['Date', 'Customer', 'Amount']
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        return None, f"Missing columns: {missing}. Please check your file."
-        
-    # 4. Processing
+    # Data Type Enforcement
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
-    
-    # Fail-safe for Product column
-    if 'Item' not in df.columns:
-        df['Item'] = "General Item"
-    else:
-        df['Item'] = df['Item'].fillna("Unknown Product")
+    df['Item'] = df['Item'].fillna("Unknown")
 
-    # 5. RFM Calculation
-    snapshot_date = df['Date'].max()
-    
-    # Safe Mode function for finding top item
-    def get_mode_item(x):
-        try:
-            return str(x.mode().iloc[0]) # Force to string
-        except:
-            return "General Item"
+    # 2. Reference Date (Simulation of "Today")
+    # In a real app, this is datetime.now(). For historical data, we use the max date in file.
+    snapshot_date = df['Date'].max() + datetime.timedelta(days=1)
 
-    rfm = df.groupby('Customer').agg({
-        'Date': lambda x: (snapshot_date - x.max()).days,
-        'Customer': 'count',
-        'Amount': 'sum',
-        'Item': get_mode_item
-    }).rename(columns={'Date': 'Days_Silent', 'Customer': 'Orders', 'Amount': 'Total_Spent', 'Item': 'Top_Item'})
+    # 3. Aggregation per Customer (RFM Analysis)
+    churn_df = df.groupby('Customer').agg({
+        'Date': lambda x: (snapshot_date - x.max()).days,  # Recency (Days since last purchase)
+        'Customer': 'count',                                # Frequency (Total transactions)
+        'Amount': 'sum',                                    # Monetary (Total LTV)
+        'Item': lambda x: x.mode()[0] if not x.mode().empty else "Mix" # Favorite Product
+    }).rename(columns={
+        'Date': 'Days_Since_Last_Purchase',
+        'Customer': 'Purchase_Frequency',
+        'Amount': 'Total_LTV',
+        'Item': 'Favorite_Product'
+    })
+
+    # 4. CHURN CLASSIFICATION LOGIC (The "Internship Evaluation" Part)
+    # Logic:
+    # - Active: Bought within last 45 days
+    # - At Risk: Bought 46-90 days ago (Needs attention)
+    # - Likely Churned: No purchase in >90 days (Lost revenue)
     
-    # 6. Risk Scoring & CLV Prediction (NEW FEATURE)
-    def get_risk(row):
-        if row['Days_Silent'] > 90: return 'High Risk'
-        elif row['Days_Silent'] > 45: return 'Medium Risk'
-        else: return 'Safe'
+    def classify_churn(row):
+        recency = row['Days_Since_Last_Purchase']
+        freq = row['Purchase_Frequency']
         
-    rfm['Status'] = rfm.apply(get_risk, axis=1)
-    
-    # 7. CLV Calculation (Simple Predictive Model)
-    # Logic: Avg Spend * Purchase Frequency * Profit Margin (assumed 20%) * 12 Months
-    avg_order_value = rfm['Total_Spent'] / rfm['Orders']
-    purchase_freq = rfm['Orders'] # Simplified for this dataset
-    rfm['Predicted_CLV'] = (avg_order_value * purchase_freq * 0.20 * 12).fillna(0)
-    
-    return rfm.reset_index(), None
+        if recency <= 45:
+            if freq > 5: return "Loyal Active"
+            return "Active"
+        elif 45 < recency <= 90:
+            return "⚠️ At Risk"
+        else:
+            return "🔴 Likely Churned"
 
-def generate_pdf(df_risk):
-    # PDF Generator - SAFE MODE
+    churn_df['Churn_Status'] = churn_df.apply(classify_churn, axis=1)
+    
+    # Add Average Order Value (AOV)
+    churn_df['Avg_Order_Value'] = churn_df['Total_LTV'] / churn_df['Purchase_Frequency']
+
+    return churn_df.reset_index(), snapshot_date
+
+# PDF Generator (Fixed for Churn Data)
+def generate_churn_report(df):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "RetainIQ Risk Report", ln=True, align='C')
+    pdf.cell(0, 10, "Customer Churn Risk Report", ln=True, align='C')
     pdf.ln(10)
     
     pdf.set_font("Arial", 'B', 10)
-    # Header
-    pdf.cell(55, 10, "Customer", 1)
-    pdf.cell(25, 10, "Days Silent", 1)
-    pdf.cell(40, 10, "Total (Rs.)", 1) # Use Rs. to avoid crash
-    pdf.cell(40, 10, "Top Item", 1)
-    pdf.cell(30, 10, "Status", 1)
+    # Headers
+    headers = ["Customer", "Status", "Days Inactive", "Rev at Risk"]
+    widths = [60, 40, 40, 40]
+    
+    for i, h in enumerate(headers):
+        pdf.cell(widths[i], 10, h, 1)
     pdf.ln()
     
     pdf.set_font("Arial", '', 9)
-    # Rows
-    for _, row in df_risk.iterrows():
-        if row['Status'] != "Safe":
-            # 1. Clean Customer Name (Remove emojis/weird chars)
-            cust_name = str(row['Customer'])[:25].encode('latin-1', 'replace').decode('latin-1')
-            
-            # 2. Clean Item Name
-            item_name = str(row['Top_Item'])[:20].encode('latin-1', 'replace').decode('latin-1')
-            
-            # 3. Format Money (No symbol, just numbers)
-            money_str = f"{row['Total_Spent']:.0f}"
-            
-            pdf.cell(55, 10, cust_name, 1)
-            pdf.cell(25, 10, str(row['Days_Silent']), 1)
-            pdf.cell(40, 10, money_str, 1)
-            pdf.cell(40, 10, item_name, 1)
-            pdf.cell(30, 10, row['Status'], 1)
-            pdf.ln()
-            
-    return pdf.output(dest='S').encode('latin-1', 'ignore')
+    # Filter for Risky Customers only
+    risky_df = df[df['Churn_Status'].str.contains("Risk|Churned")]
     
+    for _, row in risky_df.iterrows():
+        try:
+            cust = str(row['Customer'])[:25].encode('latin-1', 'replace').decode('latin-1')
+            status = row['Churn_Status']
+            days = str(row['Days_Since_Last_Purchase'])
+            rev = f"{row['Total_LTV']:.0f}"
+            
+            pdf.cell(widths[0], 10, cust, 1)
+            pdf.cell(widths[1], 10, status, 1)
+            pdf.cell(widths[2], 10, days, 1)
+            pdf.cell(widths[3], 10, rev, 1)
+            pdf.ln()
+        except:
+            continue
+            
+    return pdf.output(dest='S').encode('latin-1')
+
 # ==========================================
-# 4. FEATURE RENDERERS
+# 5. UI RENDERERS
 # ==========================================
 
 def render_login_page():
-    st.markdown("<h1 style='text-align: center;'>🧠 RetainIQ Pro</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Intelligent Customer Retention System</p>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>📉 RetainIQ: Churn Analysis</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>Predict Customer Attrition from Transaction Data</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        tab1, tab2 = st.tabs(["Login", "Create Account"])
-        
+        tab1, tab2 = st.tabs(["Login", "Sign Up"])
         with tab1:
-            email = st.text_input("Email", key="l_email")
-            password = st.text_input("Password", type="password", key="l_pass")
-            if st.button("Login", use_container_width=True):
-                if email and password:
-                    login_user(email, password)
-                else:
-                    st.warning("Please fill all fields")
-        
+            email = st.text_input("Email", key="l_e")
+            pwd = st.text_input("Password", type="password", key="l_p")
+            if st.button("Login", use_container_width=True): login_user(email, pwd)
         with tab2:
-            new_email = st.text_input("Email", key="s_email")
-            new_name = st.text_input("Full Name", key="s_name")
-            new_pass = st.text_input("Password", type="password", key="s_pass")
-            if st.button("Sign Up", use_container_width=True):
-                if new_email and new_name and new_pass:
-                    signup_user(new_email, new_pass, new_name)
-                else:
-                    st.warning("Please fill all fields")
+            ne = st.text_input("Email", key="s_e")
+            nn = st.text_input("Name", key="s_n")
+            np = st.text_input("Password", type="password", key="s_p")
+            if st.button("Create Account", use_container_width=True): signup_user(ne, np, nn)
 
 def render_dashboard():
-    st.header("📊 Transaction Analyzer")
-    st.info("Upload CSV/Excel with columns: `CustomerName`, `OrderDate`, `SalesAmount`, `Product`")
+    st.title("📊 Customer Churn Dashboard")
+    st.markdown("### Upload Transaction Data to Diagnose Retention")
     
-    uploaded_file = st.file_uploader("Upload Sales Data", type=['csv', 'xlsx'])
+    uploaded_file = st.file_uploader("Required Columns: CustomerName, OrderDate, SalesAmount, Product", type=['csv', 'xlsx'])
     
-    # Process Upload
     if uploaded_file:
         try:
             if uploaded_file.name.endswith('.csv'):
@@ -303,198 +304,184 @@ def render_dashboard():
             else:
                 df_raw = pd.read_excel(uploaded_file)
             
-            risk_df, error = process_data(df_raw)
+            # Process Data using Behavioral Logic
+            churn_df, analysis_date = calculate_churn_metrics(df_raw)
+            st.session_state.risk_df = churn_df
+            st.success(f"Analysis successfully derived from transaction history (As of {analysis_date.date()})")
             
-            if error:
-                st.error(error)
-            else:
-                # Store in Session State
-                st.session_state.risk_df = risk_df
-                st.session_state.analysis_date = datetime.date.today()
-                st.success("Analysis Complete!")
         except Exception as e:
-            st.error(f"File Error: {e}")
+            st.error(f"Error processing file: {e}")
 
-    # Display Results (if data exists)
+    # --- DASHBOARD VISUALS ---
     if st.session_state.risk_df is not None:
-        risk_df = st.session_state.risk_df
+        df = st.session_state.risk_df
         
-        # Metrics
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Customers", len(risk_df))
-        high_risk = len(risk_df[risk_df['Status']=='High Risk'])
-        m2.metric("🚨 High Risk", high_risk)
-        total_rev = risk_df['Total_Spent'].sum()
-        m3.metric("💰 Total Revenue", f"₹{total_rev:,.0f}")
-        avg_val = risk_df['Total_Spent'].mean()
-        m4.metric("Avg Spend", f"₹{avg_val:,.0f}")
+        # 1. High-Level Churn KPIs
+        st.markdown("---")
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         
-        st.divider()
+        active_count = len(df[df['Churn_Status'].str.contains("Active")])
+        churned_count = len(df[df['Churn_Status'].str.contains("Churned")])
+        at_risk_count = len(df[df['Churn_Status'].str.contains("Risk")])
+        revenue_at_risk = df[df['Churn_Status'].str.contains("Risk")]['Total_LTV'].sum()
         
-        # Charts & Data
+        kpi1.metric("🟢 Active Customers", active_count, "Loyal Base")
+        kpi2.metric("⚠️ At Risk (Action Needed)", at_risk_count, "Needs Attention", delta_color="off")
+        kpi3.metric("🔴 Likely Churned", churned_count, "Inactivity > 90 Days", delta_color="inverse")
+        kpi4.metric("💰 Revenue at Risk", f"₹{revenue_at_risk:,.0f}", "Potential Loss")
+        
+        st.markdown("---")
+
+        # 2. CHURN RISK MATRIX (The "Interview" Chart)
         c1, c2 = st.columns([2, 1])
+        
         with c1:
-            st.subheader("📉 Risk Matrix")
-            fig = px.scatter(risk_df, x="Days_Silent", y="Total_Spent",
-                                color="Status", size="Total_Spent",
-                                hover_data=['Customer', 'Top_Item'],
-                                color_discrete_map={'High Risk':'red', 'Medium Risk':'orange', 'Safe':'green'})
+            st.subheader("📉 Churn Risk Matrix")
+            st.caption("X-Axis: Days Inactive (Recency) | Y-Axis: Total Spend (Monetary)")
+            
+            # Scatter plot showing Churn Zones
+            fig = px.scatter(
+                df, 
+                x="Days_Since_Last_Purchase", 
+                y="Total_LTV",
+                color="Churn_Status",
+                size="Avg_Order_Value",
+                hover_data=["Customer", "Favorite_Product"],
+                color_discrete_map={
+                    "Loyal Active": "green",
+                    "Active": "#90EE90",
+                    "⚠️ At Risk": "orange",
+                    "🔴 Likely Churned": "red"
+                },
+                title="Customer Segmentation by Inactivity vs Value"
+            )
+            # Add vertical lines for thresholds
+            fig.add_vline(x=45, line_dash="dash", annotation_text="Active Limit")
+            fig.add_vline(x=90, line_dash="dash", annotation_text="Churn Threshold")
             st.plotly_chart(fig, use_container_width=True)
 
-        # --- NEW VISUALIZATION SECTION ---
-        st.subheader("🔍 Deep Dive: Risk by Product Category")
-        
-        # Sunburst Chart: Shows connection between Risk Status -> Top Item -> Value
-        fig_sun = px.sunburst(
-            risk_df, 
-            path=['Status', 'Top_Item'], 
-            values='Total_Spent',
-            color='Status',
-            color_discrete_map={'High Risk':'red', 'Medium Risk':'orange', 'Safe':'green'},
-            title="Revenue at Risk by Product Category"
-        )
-        st.plotly_chart(fig_sun, use_container_width=True)
-        # ---------------------------------
-        
         with c2:
-            st.subheader("📋 Risk Report")
-            # Display Table
-            display_df = risk_df[risk_df['Status'].str.contains('Risk')][['Customer', 'Top_Item', 'Total_Spent', 'Status']].sort_values('Total_Spent', ascending=False)
-                    
-            # Add Rupee Symbol for Display Only
-            display_df['Total_Spent'] = display_df['Total_Spent'].apply(lambda x: f"₹{x:,.0f}")
-                    
-            st.dataframe(display_df, hide_index=True)
-                    
-            # PDF Download
-            pdf_data = generate_pdf(risk_df)
-            st.download_button("⬇️ Download PDF Report", data=pdf_data, file_name="Risk_Report.pdf", mime="application/pdf")
-            
+            st.subheader("🥧 Risk Distribution")
+            fig_pie = px.pie(df, names='Churn_Status', title="Customer Base Health", hole=0.4,
+                             color='Churn_Status',
+                             color_discrete_map={
+                                "Loyal Active": "green", "Active": "#90EE90",
+                                "⚠️ At Risk": "orange", "🔴 Likely Churned": "red"
+                             })
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        # 3. SEGMENT DRILL-DOWN & REPORTING
+        st.subheader("📋 At-Risk Customer List (Priority for Retention)")
+        
+        # Filter Logic
+        risk_filter = df[df['Churn_Status'].str.contains("Risk|Churned")]
+        display_cols = ['Customer', 'Churn_Status', 'Days_Since_Last_Purchase', 'Total_LTV', 'Favorite_Product']
+        
+        st.dataframe(
+            risk_filter[display_cols].sort_values('Days_Since_Last_Purchase', ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Download Report
+        if st.button("📥 Download Churn Risk Report (PDF)"):
+            pdf_bytes = generate_churn_report(df)
+            st.download_button(
+                "Click to Download",
+                data=pdf_bytes,
+                file_name="churn_risk_analysis.pdf",
+                mime="application/pdf"
+            )
+
 def render_ai_consultant():
-    st.header("🤖 AI Retention Specialist")
+    st.title("🤖 AI Retention Strategist")
+    st.markdown("Generates personalized re-engagement emails for churned customers.")
     
     if st.session_state.risk_df is None:
-        st.warning("⚠️ Please go to the Dashboard and upload data first.")
+        st.warning("Please upload transaction data in the Dashboard first.")
         return
-
-    risk_df = st.session_state.risk_df
-    # Filter for risks
-    risky_custs = risk_df[risk_df['Status'].str.contains('Risk')]
+        
+    df = st.session_state.risk_df
+    # Only show risky customers
+    risky_custs = df[df['Churn_Status'].str.contains("Risk|Churned")]
     
     if risky_custs.empty:
-        st.success("✅ No high-risk customers found!")
+        st.success("No customers currently at risk!")
         return
-
+        
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        st.subheader("Select Customer")
-        sel_cust = st.selectbox("Choose Customer", risky_custs['Customer'].unique())
+        st.info("Select a customer to generate a win-back strategy.")
+        sel_cust = st.selectbox("Select At-Risk Customer", risky_custs['Customer'].unique())
         
-        # Get Data Safely
         cust_data = risky_custs[risky_custs['Customer'] == sel_cust].iloc[0]
         
-        # Safe variables for Display & AI
-        c_days = cust_data['Days_Silent']
-        c_val = f"{cust_data['Total_Spent']:,.0f}"
-        c_item = str(cust_data['Top_Item']) # Force string to prevent crashes
+        # Metrics Display
+        st.metric("Days Inactive", f"{cust_data['Days_Since_Last_Purchase']} Days")
+        st.metric("Lifetime Value", f"₹{cust_data['Total_LTV']:,.0f}")
+        st.metric("Favorite Item", cust_data['Favorite_Product'])
         
-        st.markdown(f"""
-        <div style='background-color:#f0f2f6; padding:15px; border-radius:10px;'>
-            <h4>{sel_cust}</h4>
-            <p><b>Status:</b> {cust_data['Status']}</p>
-            <p><b>Silent:</b> {c_days} days</p>
-            <p><b>Value:</b> ₹{c_val}</p>
-            <p><b>Loves:</b> {c_item}</p>
-        </div>
-        """, unsafe_allow_html=True)
-
     with col2:
-        st.subheader("Generate Strategy")
-        action = st.radio("Choose Action", ["Analyze Churn Reason", "Draft Email Offer", "Calculate LTV"])
+        st.subheader("Strategy Generator")
+        strategy_type = st.radio("Goal:", ["Win-Back Email (Discount)", "Feedback Request", "Product Recommendation"])
         
-        if st.button("✨ Ask AI", use_container_width=True):
+        if st.button("✨ Generate AI Strategy", use_container_width=True):
             if not groq_client:
-                st.error("AI Key Missing in Secrets")
+                st.error("AI API Key Missing")
             else:
-                with st.spinner("Consulting AI..."):
+                with st.spinner("Analyzing purchasing behavior..."):
                     try:
                         prompt = f"""
-                        You are a Retention Expert.
+                        Act as a Retention Manager.
                         Customer: {sel_cust}
-                        Silent for: {c_days} days.
-                        Total Spend: ₹{c_val}.
-                        Favorite Item: {c_item}.
+                        Status: {cust_data['Churn_Status']}
+                        Inactive for: {cust_data['Days_Since_Last_Purchase']} days.
+                        Favorite Product: {cust_data['Favorite_Product']}
+                        Total Spend: ₹{cust_data['Total_LTV']}
                         
-                        Task: {action}.
-                        Keep it professional, concise, and use Rupees (₹).
+                        Goal: {strategy_type}
+                        
+                        Write a short, personalized email/message to bring them back.
+                        Highlight their favorite product if relevant.
                         """
                         
                         res = groq_client.chat.completions.create(
                             model="llama-3.1-8b-instant",
                             messages=[{"role": "user", "content": prompt}]
                         )
-                        st.success("Strategy Generated:")
+                        st.success("Strategy Ready:")
                         st.markdown(res.choices[0].message.content)
                         
-                        # --- NEW ACTION BUTTON ---
+                        # Mock Action
                         st.divider()
-                        col_btn1, col_btn2 = st.columns(2)
-                        with col_btn1:
-                            if st.button("📧 Send Email Campaign", use_container_width=True):
-                                time.sleep(1)
-                                st.toast(f"Email successfully queued for {sel_cust}!", icon="✅")
-                                st.balloons()
-                        with col_btn2:
-                            if st.button("💾 Save to CRM", use_container_width=True):
-                                st.toast(f"Strategy saved to Customer Record #{sel_cust}", icon="💾")
-                        # -------------------------
+                        if st.button(f"📧 Send to {sel_cust}"):
+                            st.toast("Email queued in CRM!", icon="✅")
+                            
                     except Exception as e:
                         st.error(f"AI Error: {e}")
 
 # ==========================================
-# 5. MAIN APP LOGIC
+# 6. MAIN ROUTING
 # ==========================================
 
 def main():
-    # 1. CHECK AUTH STATUS
     if not st.session_state.logged_in:
         render_login_page()
         return
 
-    # 2. SIDEBAR NAVIGATION (Only if logged in)
     with st.sidebar:
         st.title("RetainIQ")
-        st.write(f"👤 {st.session_state.user_name}")
-        
-        # Navigation Buttons
-        if st.button("📊 Dashboard", use_container_width=True): go_to("📊 Dashboard")
-        if st.button("🤖 AI Consultant", use_container_width=True): go_to("🤖 AI Consultant")
-        
+        st.caption(f"Logged in as: {st.session_state.user_name}")
         st.divider()
-        
-        # System Status
-        conn = get_db_connection()
-        if conn:
-            st.caption("🟢 Database: Connected")
-            conn.close()
-        else:
-            st.caption("🔴 Database: Disconnected")
-            
-        if groq_client:
-            st.caption("🟢 AI Engine: Active")
-        else:
-            st.caption("🔴 AI Engine: Inactive")
-            
+        if st.button("📊 Churn Dashboard", use_container_width=True): go_to("📊 Churn Dashboard")
+        if st.button("🤖 AI Strategist", use_container_width=True): go_to("🤖 AI Strategist")
         st.divider()
-        if st.button("🚪 Logout", use_container_width=True): logout_user()
+        if st.button("Logout"): logout_user()
 
-    # 3. ROUTING
-    page = st.session_state.feature
-    
-    if page == "📊 Dashboard":
+    if st.session_state.feature == "📊 Churn Dashboard":
         render_dashboard()
-    elif page == "🤖 AI Consultant":
+    elif st.session_state.feature == "🤖 AI Strategist":
         render_ai_consultant()
 
 if __name__ == "__main__":
