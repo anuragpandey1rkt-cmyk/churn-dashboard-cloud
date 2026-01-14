@@ -475,8 +475,10 @@ def render_ai():
         with st.chat_message("assistant"):
             if not groq_client:
                 st.error("AI Key Missing")
+                response_text = "Error: No API Key"
             else:
                 try:
+                    # Context-Aware System Prompt
                     system_context = f"""
                     You are a Senior Retention Specialist.
                     Focus Customer: {sel}
@@ -486,23 +488,36 @@ def render_ai():
                     - Favorite Product: {data['Fav_Product']}
                     - Risk Score: {data['Churn_Risk_Score']}/100
                     
-                    Answer the user's question specifically about this customer.
+                    Answer the user's question specifically about this customer. 
                     Keep answers concise, professional, and actionable.
                     """
                     
                     stream = groq_client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
+                        model="llama-3.1-8b-instant", 
                         messages=[
                             {"role": "system", "content": system_context},
                             *st.session_state.messages
                         ],
                         stream=True
                     )
-                    response_text = st.write_stream(stream)
+                    
+                    # --- FIX STARTS HERE ---
+                    # Helper to extract text from Groq objects
+                    def stream_text():
+                        for chunk in stream:
+                            content = chunk.choices[0].delta.content
+                            if content:
+                                yield content
+
+                    response_text = st.write_stream(stream_text())
+                    # --- FIX ENDS HERE ---
+                    
+                    # Save AI Response
                     st.session_state.messages.append({"role": "assistant", "content": response_text})
                     
                 except Exception as e:
                     st.error(f"Chat Error: {e}")
+                    
                     
 # ==========================================
 # 5. MAIN ROUTING
