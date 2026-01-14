@@ -7,13 +7,13 @@ import io
 import hashlib
 import time
 import datetime
-from fpdf import FPDF
+import xlsxwriter
 
 # ==========================================
 # 1. CONFIGURATION & INIT
 # ==========================================
 st.set_page_config(
-    page_title="RetainIQ: Churn Analysis",
+    page_title="RetainIQ: Churn Analytics",
     page_icon="📉",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -58,7 +58,7 @@ def init_session_state():
         "user_name": None,
         "logged_in": False,
         "feature": "📊 Churn Dashboard",
-        "risk_df": None,
+        "churn_df": None,
         "analysis_date": None
     }
     for key, value in defaults.items():
@@ -153,21 +153,17 @@ def signup_user(email, password, name):
 def logout_user():
     st.session_state.user = None
     st.session_state.logged_in = False
-    st.session_state.risk_df = None
+    st.session_state.churn_df = None
     st.rerun()
 
 # ==========================================
-# 4. CORE CHURN LOGIC (The "Brain")
+# 4. CHURN LOGIC ENGINE (The Core Upgrade)
 # ==========================================
 
-def calculate_churn_metrics(df):
+def process_churn_data(df):
     """
-    This function converts raw transactions into Behavioral Churn Metrics.
-    Logic:
-    1. Recency: How long since last buy?
-    2. Frequency: How often do they buy?
-    3. Monetary: How much do they spend?
-    4. Churn Classification: Based on inactivity thresholds.
+    Converts raw transactions into Behavioral Churn Metrics.
+    Logic: RFM (Recency, Frequency, Monetary)
     """
     
     # 1. Clean & Map Columns
@@ -176,7 +172,7 @@ def calculate_churn_metrics(df):
         'OrderDate': 'Date', 'CustomerName': 'Customer', 
         'SalesAmount': 'Amount', 'Product': 'Item'
     }
-    # Fail-safe mapping if user uploads variations
+    # Fail-safe mapping
     for col in df.columns:
         if 'Date' in col: col_map[col] = 'Date'
         if 'Name' in col or 'Customer' in col: col_map[col] = 'Customer'
@@ -185,98 +181,77 @@ def calculate_churn_metrics(df):
         
     df = df.rename(columns=col_map)
     
-    # Data Type Enforcement
+    # Data Cleaning
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
     df['Item'] = df['Item'].fillna("Unknown")
 
-    # 2. Reference Date (Simulation of "Today")
-    # In a real app, this is datetime.now(). For historical data, we use the max date in file.
+    # 2. Set Analysis Snapshot Date
+    # In real-world, this is 'Today'. In datasets, it's Max Date + 1
     snapshot_date = df['Date'].max() + datetime.timedelta(days=1)
 
-    # 3. Aggregation per Customer (RFM Analysis)
+    # 3. RFM Aggregation
+    # We group by Customer to derive behavior
     churn_df = df.groupby('Customer').agg({
-        'Date': lambda x: (snapshot_date - x.max()).days,  # Recency (Days since last purchase)
-        'Customer': 'count',                                # Frequency (Total transactions)
-        'Amount': 'sum',                                    # Monetary (Total LTV)
-        'Item': lambda x: x.mode()[0] if not x.mode().empty else "Mix" # Favorite Product
+        'Date': lambda x: (snapshot_date - x.max()).days,  # RECENCY (Critical for Churn)
+        'Customer': 'count',                                # FREQUENCY (Habit)
+        'Amount': 'sum',                                    # MONETARY (LTV)
+        'Item': lambda x: x.mode()[0] if not x.mode().empty else "Mix" # Preference
     }).rename(columns={
         'Date': 'Days_Since_Last_Purchase',
-        'Customer': 'Purchase_Frequency',
+        'Customer': 'Total_Orders',
         'Amount': 'Total_LTV',
         'Item': 'Favorite_Product'
     })
 
-    # 4. CHURN CLASSIFICATION LOGIC (The "Internship Evaluation" Part)
-    # Logic:
-    # - Active: Bought within last 45 days
-    # - At Risk: Bought 46-90 days ago (Needs attention)
-    # - Likely Churned: No purchase in >90 days (Lost revenue)
-    
-    def classify_churn(row):
+    # 4. DEFINING CHURN STATUS (Business Logic)
+    # Rule Based Classification for Defensibility
+    def classify_customer(row):
         recency = row['Days_Since_Last_Purchase']
-        freq = row['Purchase_Frequency']
         
         if recency <= 45:
-            if freq > 5: return "Loyal Active"
-            return "Active"
+            return "🟢 Active"
         elif 45 < recency <= 90:
             return "⚠️ At Risk"
         else:
-            return "🔴 Likely Churned"
+            return "🔴 Churned" # Inactive > 90 Days
 
-    churn_df['Churn_Status'] = churn_df.apply(classify_churn, axis=1)
+    churn_df['Churn_Status'] = churn_df.apply(classify_customer, axis=1)
     
-    # Add Average Order Value (AOV)
-    churn_df['Avg_Order_Value'] = churn_df['Total_LTV'] / churn_df['Purchase_Frequency']
-
     return churn_df.reset_index(), snapshot_date
 
-# PDF Generator (Fixed for Churn Data)
-def generate_churn_report(df):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "Customer Churn Risk Report", ln=True, align='C')
-    pdf.ln(10)
+# Excel Report Generator
+def generate_excel_report(df):
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    worksheet = workbook.add_worksheet()
+
+    # Formats
+    header_fmt = workbook.add_format({'bold': True, 'bg_color': '#FF4B4B', 'font_color': 'white'})
     
-    pdf.set_font("Arial", 'B', 10)
     # Headers
-    headers = ["Customer", "Status", "Days Inactive", "Rev at Risk"]
-    widths = [60, 40, 40, 40]
+    headers = ["Customer", "Churn Status", "Days Inactive", "Total Orders", "Lifetime Value"]
+    for col, h in enumerate(headers):
+        worksheet.write(0, col, h, header_fmt)
     
-    for i, h in enumerate(headers):
-        pdf.cell(widths[i], 10, h, 1)
-    pdf.ln()
-    
-    pdf.set_font("Arial", '', 9)
-    # Filter for Risky Customers only
-    risky_df = df[df['Churn_Status'].str.contains("Risk|Churned")]
-    
-    for _, row in risky_df.iterrows():
-        try:
-            cust = str(row['Customer'])[:25].encode('latin-1', 'replace').decode('latin-1')
-            status = row['Churn_Status']
-            days = str(row['Days_Since_Last_Purchase'])
-            rev = f"{row['Total_LTV']:.0f}"
+    # Data
+    for row, data in enumerate(df.itertuples(), 1):
+        worksheet.write(row, 0, data.Customer)
+        worksheet.write(row, 1, data.Churn_Status)
+        worksheet.write(row, 2, data.Days_Since_Last_Purchase)
+        worksheet.write(row, 3, data.Total_Orders)
+        worksheet.write(row, 4, data.Total_LTV)
             
-            pdf.cell(widths[0], 10, cust, 1)
-            pdf.cell(widths[1], 10, status, 1)
-            pdf.cell(widths[2], 10, days, 1)
-            pdf.cell(widths[3], 10, rev, 1)
-            pdf.ln()
-        except:
-            continue
-            
-    return pdf.output(dest='S').encode('latin-1')
+    workbook.close()
+    return output.getvalue()
 
 # ==========================================
 # 5. UI RENDERERS
 # ==========================================
 
 def render_login_page():
-    st.markdown("<h1 style='text-align: center;'>📉 RetainIQ: Churn Analysis</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Predict Customer Attrition from Transaction Data</p>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>📉 RetainIQ: Churn Analytics</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>Behavioral Customer Churn Prediction System</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -293,9 +268,9 @@ def render_login_page():
 
 def render_dashboard():
     st.title("📊 Customer Churn Dashboard")
-    st.markdown("### Upload Transaction Data to Diagnose Retention")
+    st.markdown("### 📥 Input Data")
     
-    uploaded_file = st.file_uploader("Required Columns: CustomerName, OrderDate, SalesAmount, Product", type=['csv', 'xlsx'])
+    uploaded_file = st.file_uploader("Upload Transaction CSV/Excel", type=['csv', 'xlsx'])
     
     if uploaded_file:
         try:
@@ -304,160 +279,166 @@ def render_dashboard():
             else:
                 df_raw = pd.read_excel(uploaded_file)
             
-            # Process Data using Behavioral Logic
-            churn_df, analysis_date = calculate_churn_metrics(df_raw)
-            st.session_state.risk_df = churn_df
-            st.success(f"Analysis successfully derived from transaction history (As of {analysis_date.date()})")
+            # Process Data
+            churn_df, analysis_date = process_churn_data(df_raw)
+            st.session_state.churn_df = churn_df
+            st.success(f"Churn Analysis Updated: {analysis_date.date()}")
             
         except Exception as e:
             st.error(f"Error processing file: {e}")
 
-    # --- DASHBOARD VISUALS ---
-    if st.session_state.risk_df is not None:
-        df = st.session_state.risk_df
+    # --- CHURN ANALYTICS ---
+    if st.session_state.churn_df is not None:
+        df = st.session_state.churn_df
         
-        # 1. High-Level Churn KPIs
+        # 1. Churn KPIs
         st.markdown("---")
+        st.subheader("🛑 High-Level Churn Metrics")
+        
+        total_customers = len(df)
+        churned_custs = df[df['Churn_Status'] == "🔴 Churned"]
+        risk_custs = df[df['Churn_Status'] == "⚠️ At Risk"]
+        active_custs = df[df['Churn_Status'] == "🟢 Active"]
+        
+        churn_rate = (len(churned_custs) / total_customers) * 100
+        rev_at_risk = risk_custs['Total_LTV'].sum() + churned_custs['Total_LTV'].sum()
+        
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        
-        active_count = len(df[df['Churn_Status'].str.contains("Active")])
-        churned_count = len(df[df['Churn_Status'].str.contains("Churned")])
-        at_risk_count = len(df[df['Churn_Status'].str.contains("Risk")])
-        revenue_at_risk = df[df['Churn_Status'].str.contains("Risk")]['Total_LTV'].sum()
-        
-        kpi1.metric("🟢 Active Customers", active_count, "Loyal Base")
-        kpi2.metric("⚠️ At Risk (Action Needed)", at_risk_count, "Needs Attention", delta_color="off")
-        kpi3.metric("🔴 Likely Churned", churned_count, "Inactivity > 90 Days", delta_color="inverse")
-        kpi4.metric("💰 Revenue at Risk", f"₹{revenue_at_risk:,.0f}", "Potential Loss")
+        kpi1.metric("Churn Rate", f"{churn_rate:.1f}%", "Target: <15%", delta_color="inverse")
+        kpi2.metric("Revenue at Risk", f"₹{rev_at_risk:,.0f}", "LTV of Churned/Risk Users")
+        kpi3.metric("Churned Customers", len(churned_custs), "Inactive > 90 Days")
+        kpi4.metric("Active Customers", len(active_custs), "Bought < 45 Days ago")
         
         st.markdown("---")
 
-        # 2. CHURN RISK MATRIX (The "Interview" Chart)
+        # 2. CHURN RISK MATRIX (The Main Visual)
         c1, c2 = st.columns([2, 1])
         
         with c1:
             st.subheader("📉 Churn Risk Matrix")
-            st.caption("X-Axis: Days Inactive (Recency) | Y-Axis: Total Spend (Monetary)")
+            st.caption("Identify habit breakage. High Frequency + High Recency (Top Right) = **High Value Loss**.")
             
-            # Scatter plot showing Churn Zones
+            # 
+            
             fig = px.scatter(
                 df, 
                 x="Days_Since_Last_Purchase", 
-                y="Total_LTV",
+                y="Total_Orders", # Frequency implies habit
                 color="Churn_Status",
-                size="Avg_Order_Value",
+                size="Total_LTV", # Bubble size = Value
                 hover_data=["Customer", "Favorite_Product"],
                 color_discrete_map={
-                    "Loyal Active": "green",
-                    "Active": "#90EE90",
+                    "🟢 Active": "green",
                     "⚠️ At Risk": "orange",
-                    "🔴 Likely Churned": "red"
+                    "🔴 Churned": "red"
                 },
-                title="Customer Segmentation by Inactivity vs Value"
+                labels={"Days_Since_Last_Purchase": "Days Inactive (Recency)", "Total_Orders": "Purchase Frequency"},
+                title="Recency vs Frequency (Bubble Size = LTV)"
             )
-            # Add vertical lines for thresholds
-            fig.add_vline(x=45, line_dash="dash", annotation_text="Active Limit")
-            fig.add_vline(x=90, line_dash="dash", annotation_text="Churn Threshold")
+            # Add Threshold Lines
+            fig.add_vline(x=90, line_dash="dash", line_color="red", annotation_text="Churn Threshold")
             st.plotly_chart(fig, use_container_width=True)
 
         with c2:
-            st.subheader("🥧 Risk Distribution")
-            fig_pie = px.pie(df, names='Churn_Status', title="Customer Base Health", hole=0.4,
-                             color='Churn_Status',
-                             color_discrete_map={
-                                "Loyal Active": "green", "Active": "#90EE90",
-                                "⚠️ At Risk": "orange", "🔴 Likely Churned": "red"
-                             })
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.subheader("📊 Inactivity Histogram")
+            st.caption("Distribution of days since last purchase.")
+            fig_hist = px.histogram(
+                df, 
+                x="Days_Since_Last_Purchase",
+                nbins=20,
+                color="Churn_Status",
+                color_discrete_map={
+                    "🟢 Active": "green",
+                    "⚠️ At Risk": "orange",
+                    "🔴 Churned": "red"
+                }
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
 
-        # 3. SEGMENT DRILL-DOWN & REPORTING
-        st.subheader("📋 At-Risk Customer List (Priority for Retention)")
+        # 3. ACTIONABLE REPORT
+        st.subheader("📋 Priority Retention List")
+        st.caption("Customers marked 'At Risk' or 'Churned' sorted by Lifetime Value.")
         
-        # Filter Logic
-        risk_filter = df[df['Churn_Status'].str.contains("Risk|Churned")]
+        risk_filter = df[df['Churn_Status'].isin(["⚠️ At Risk", "🔴 Churned"])]
         display_cols = ['Customer', 'Churn_Status', 'Days_Since_Last_Purchase', 'Total_LTV', 'Favorite_Product']
         
         st.dataframe(
-            risk_filter[display_cols].sort_values('Days_Since_Last_Purchase', ascending=False),
+            risk_filter[display_cols].sort_values('Total_LTV', ascending=False),
             use_container_width=True,
             hide_index=True
         )
         
-        # Download Report
-        if st.button("📥 Download Churn Risk Report (PDF)"):
-            pdf_bytes = generate_churn_report(df)
-            st.download_button(
-                "Click to Download",
-                data=pdf_bytes,
-                file_name="churn_risk_analysis.pdf",
-                mime="application/pdf"
-            )
+        # Download
+        excel_data = generate_excel_report(df)
+        st.download_button(
+            "📥 Download Churn Analysis Report",
+            data=excel_data,
+            file_name="churn_analysis_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 def render_ai_consultant():
-    st.title("🤖 AI Retention Strategist")
-    st.markdown("Generates personalized re-engagement emails for churned customers.")
+    st.title("🤖 AI Retention Consultant")
+    st.markdown("Generates explainable, context-aware retention strategies based on behavioral churn data.")
     
-    if st.session_state.risk_df is None:
-        st.warning("Please upload transaction data in the Dashboard first.")
+    if st.session_state.churn_df is None:
+        st.warning("Please upload data in the Dashboard first.")
         return
         
-    df = st.session_state.risk_df
+    df = st.session_state.churn_df
     # Only show risky customers
-    risky_custs = df[df['Churn_Status'].str.contains("Risk|Churned")]
+    risky_custs = df[df['Churn_Status'].isin(["⚠️ At Risk", "🔴 Churned"])]
     
     if risky_custs.empty:
-        st.success("No customers currently at risk!")
+        st.success("No At-Risk customers found! Great job.")
         return
         
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        st.info("Select a customer to generate a win-back strategy.")
-        sel_cust = st.selectbox("Select At-Risk Customer", risky_custs['Customer'].unique())
+        st.subheader("Select Customer")
+        sel_cust = st.selectbox("Customer Name", risky_custs['Customer'].unique())
         
         cust_data = risky_custs[risky_custs['Customer'] == sel_cust].iloc[0]
         
-        # Metrics Display
-        st.metric("Days Inactive", f"{cust_data['Days_Since_Last_Purchase']} Days")
+        # Explainable Metrics
+        st.error(f"Status: {cust_data['Churn_Status']}")
+        st.metric("Days Inactive", f"{cust_data['Days_Since_Last_Purchase']} Days", "Churn Driver")
+        st.metric("Purchase Frequency", f"{cust_data['Total_Orders']} Orders", "Habit Strength")
         st.metric("Lifetime Value", f"₹{cust_data['Total_LTV']:,.0f}")
-        st.metric("Favorite Item", cust_data['Favorite_Product'])
         
     with col2:
-        st.subheader("Strategy Generator")
-        strategy_type = st.radio("Goal:", ["Win-Back Email (Discount)", "Feedback Request", "Product Recommendation"])
+        st.subheader("AI Diagnosis & Strategy")
         
-        if st.button("✨ Generate AI Strategy", use_container_width=True):
+        if st.button("✨ Generate Retention Plan", use_container_width=True):
             if not groq_client:
                 st.error("AI API Key Missing")
             else:
-                with st.spinner("Analyzing purchasing behavior..."):
+                with st.spinner("Analyzing behavioral patterns..."):
                     try:
+                        # Context-Aware Prompt
                         prompt = f"""
-                        Act as a Retention Manager.
-                        Customer: {sel_cust}
-                        Status: {cust_data['Churn_Status']}
-                        Inactive for: {cust_data['Days_Since_Last_Purchase']} days.
-                        Favorite Product: {cust_data['Favorite_Product']}
-                        Total Spend: ₹{cust_data['Total_LTV']}
+                        You are a Churn Analysis Expert.
+                        Analyze this customer: {sel_cust}.
                         
-                        Goal: {strategy_type}
+                        Behavioral Data:
+                        - Status: {cust_data['Churn_Status']} (Inactive for {cust_data['Days_Since_Last_Purchase']} days).
+                        - Value: ₹{cust_data['Total_LTV']} (Lifetime Spend).
+                        - Frequency: {cust_data['Total_Orders']} orders.
+                        - Favorite Item: {cust_data['Favorite_Product']}.
                         
-                        Write a short, personalized email/message to bring them back.
-                        Highlight their favorite product if relevant.
+                        Task:
+                        1. DIAGNOSIS: Explain WHY they are considered churned/at-risk based on the data.
+                        2. STRATEGY: Suggest a specific retention offer (Discount/Bundle/Check-in).
+                        3. ACTION: Draft a short, empathetic email to win them back.
                         """
                         
                         res = groq_client.chat.completions.create(
                             model="llama-3.1-8b-instant",
                             messages=[{"role": "user", "content": prompt}]
                         )
-                        st.success("Strategy Ready:")
                         st.markdown(res.choices[0].message.content)
                         
-                        # Mock Action
-                        st.divider()
-                        if st.button(f"📧 Send to {sel_cust}"):
-                            st.toast("Email queued in CRM!", icon="✅")
-                            
                     except Exception as e:
                         st.error(f"AI Error: {e}")
 
@@ -472,16 +453,16 @@ def main():
 
     with st.sidebar:
         st.title("RetainIQ")
-        st.caption(f"Logged in as: {st.session_state.user_name}")
+        st.caption(f"User: {st.session_state.user_name}")
         st.divider()
         if st.button("📊 Churn Dashboard", use_container_width=True): go_to("📊 Churn Dashboard")
-        if st.button("🤖 AI Strategist", use_container_width=True): go_to("🤖 AI Strategist")
+        if st.button("🤖 AI Consultant", use_container_width=True): go_to("🤖 AI Consultant")
         st.divider()
         if st.button("Logout"): logout_user()
 
     if st.session_state.feature == "📊 Churn Dashboard":
         render_dashboard()
-    elif st.session_state.feature == "🤖 AI Strategist":
+    elif st.session_state.feature == "🤖 AI Consultant":
         render_ai_consultant()
 
 if __name__ == "__main__":
