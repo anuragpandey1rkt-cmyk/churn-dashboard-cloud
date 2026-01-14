@@ -465,6 +465,7 @@ def render_ai():
 
     # Handle Input
     # Note: Using a different variable name 'chat_input' to avoid conflict with strategy 'prompt'
+    # 4. Handle New User Input
     if chat_input := st.chat_input(f"Ask about {sel}..."):
         # Display User Message
         st.session_state.messages.append({"role": "user", "content": chat_input})
@@ -475,12 +476,11 @@ def render_ai():
         with st.chat_message("assistant"):
             if not groq_client:
                 st.error("AI Key Missing")
-                response_text = "Error: No API Key"
             else:
                 try:
-                    # Context-Aware System Prompt
+                    # Context for the AI
                     system_context = f"""
-                    You are a Senior Retention Specialist.
+                    You are a Retention Expert.
                     Focus Customer: {sel}
                     - Status: {data['Lifecycle_Stage']}
                     - Days Inactive: {data['Recency']}
@@ -488,31 +488,32 @@ def render_ai():
                     - Favorite Product: {data['Fav_Product']}
                     - Risk Score: {data['Churn_Risk_Score']}/100
                     
-                    Answer the user's question specifically about this customer. 
-                    Keep answers concise, professional, and actionable.
+                    Answer the user's question specifically about this customer.
+                    Keep answers concise and text-only (no JSON).
                     """
                     
+                    # Create the stream
                     stream = groq_client.chat.completions.create(
-                        model="llama-3.1-8b-instant", 
+                        model="llama-3.1-8b-instant",
                         messages=[
                             {"role": "system", "content": system_context},
-                            *st.session_state.messages
+                            # Filter out any bad history to prevent crashes
+                            *[m for m in st.session_state.messages if isinstance(m.get('content'), str)]
                         ],
                         stream=True
                     )
                     
-                    # --- FIX STARTS HERE ---
-                    # Helper to extract text from Groq objects
-                    def stream_text():
+                    # --- THE FIX: Generator to extract ONLY text ---
+                    def clean_stream():
                         for chunk in stream:
-                            content = chunk.choices[0].delta.content
-                            if content:
-                                yield content
+                            # Extract text content safely
+                            if chunk.choices[0].delta.content:
+                                yield chunk.choices[0].delta.content
 
-                    response_text = st.write_stream(stream_text())
-                    # --- FIX ENDS HERE ---
+                    # Write the clean text to screen
+                    response_text = st.write_stream(clean_stream())
                     
-                    # Save AI Response
+                    # Save ONLY the text to history
                     st.session_state.messages.append({"role": "assistant", "content": response_text})
                     
                 except Exception as e:
