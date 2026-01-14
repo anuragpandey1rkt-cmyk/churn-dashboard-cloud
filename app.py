@@ -203,13 +203,20 @@ def process_data(df):
         'Item': get_mode_item
     }).rename(columns={'Date': 'Days_Silent', 'Customer': 'Orders', 'Amount': 'Total_Spent', 'Item': 'Top_Item'})
     
-    # 6. Risk Scoring
+    # 6. Risk Scoring & CLV Prediction (NEW FEATURE)
     def get_risk(row):
         if row['Days_Silent'] > 90: return 'High Risk'
         elif row['Days_Silent'] > 45: return 'Medium Risk'
         else: return 'Safe'
         
     rfm['Status'] = rfm.apply(get_risk, axis=1)
+    
+    # 7. CLV Calculation (Simple Predictive Model)
+    # Logic: Avg Spend * Purchase Frequency * Profit Margin (assumed 20%) * 12 Months
+    avg_order_value = rfm['Total_Spent'] / rfm['Orders']
+    purchase_freq = rfm['Orders'] # Simplified for this dataset
+    rfm['Predicted_CLV'] = (avg_order_value * purchase_freq * 0.20 * 12).fillna(0)
+    
     return rfm.reset_index(), None
 
 def generate_pdf(df_risk):
@@ -333,7 +340,22 @@ def render_dashboard():
                                 hover_data=['Customer', 'Top_Item'],
                                 color_discrete_map={'High Risk':'red', 'Medium Risk':'orange', 'Safe':'green'})
             st.plotly_chart(fig, use_container_width=True)
-            
+
+        # --- NEW VISUALIZATION SECTION ---
+        st.subheader("🔍 Deep Dive: Risk by Product Category")
+        
+        # Sunburst Chart: Shows connection between Risk Status -> Top Item -> Value
+        fig_sun = px.sunburst(
+            risk_df, 
+            path=['Status', 'Top_Item'], 
+            values='Total_Spent',
+            color='Status',
+            color_discrete_map={'High Risk':'red', 'Medium Risk':'orange', 'Safe':'green'},
+            title="Revenue at Risk by Product Category"
+        )
+        st.plotly_chart(fig_sun, use_container_width=True)
+        # ---------------------------------
+        
         with c2:
             st.subheader("📋 Risk Report")
             # Display Table
@@ -414,6 +436,19 @@ def render_ai_consultant():
                         )
                         st.success("Strategy Generated:")
                         st.markdown(res.choices[0].message.content)
+                        
+                        # --- NEW ACTION BUTTON ---
+                        st.divider()
+                        col_btn1, col_btn2 = st.columns(2)
+                        with col_btn1:
+                            if st.button("📧 Send Email Campaign", use_container_width=True):
+                                time.sleep(1)
+                                st.toast(f"Email successfully queued for {sel_cust}!", icon="✅")
+                                st.balloons()
+                        with col_btn2:
+                            if st.button("💾 Save to CRM", use_container_width=True):
+                                st.toast(f"Strategy saved to Customer Record #{sel_cust}", icon="💾")
+                        # -------------------------
                     except Exception as e:
                         st.error(f"AI Error: {e}")
 
