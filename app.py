@@ -60,26 +60,44 @@ def get_db_connection():
 def hash_password(password): return hashlib.sha256(str.encode(password)).hexdigest()
 
 def login_user(email, password):
-    # Fallback for demo/evaluators if DB fails
+    # 1. Admin/Demo Fallback (Prioritize this to skip DB logic)
     if email == "admin" and password == "admin":
-        st.session_state.user, st.session_state.logged_in = "Evaluator", True
+        st.session_state.user = "admin"
+        st.session_state.user_name = "Evaluator"
+        st.session_state.logged_in = True
+        st.success("Login Successful! Loading Dashboard...")
+        time.sleep(0.5)
         st.rerun()
-        return
+        return  # CRITICAL: Stop execution here to prevent falling into DB errors
 
+    # 2. Database Connection Check
     conn = get_db_connection()
-    if not conn: 
+    if not conn:
         st.error("Database unavailable. Use demo credentials (admin/admin).")
         return
+
+    # 3. Standard Authentication
     try:
         cur = conn.cursor()
         cur.execute("SELECT password_hash, name FROM users WHERE email = %s", (email,))
         data = cur.fetchone()
+        conn.close() # Close connection immediately after fetching
+
+        # Verify Password
         if data and data[0] == hash_password(password):
-            st.session_state.user, st.session_state.logged_in = data[1], True
-            st.success(f"Welcome, {data[1]}"); time.sleep(0.5); st.rerun()
-        else: st.error("Invalid credentials")
-    except: st.error("Login Error")
-    finally: conn.close()
+            st.session_state.user = email
+            st.session_state.user_name = data[1]
+            st.session_state.logged_in = True
+            st.success(f"Welcome back, {data[1]}!")
+            time.sleep(0.5)
+            st.rerun()
+        else:
+            st.error("Invalid email or password.")
+
+    except Exception as e:
+        st.error(f"Login Error: {e}")
+        if conn: conn.close()
+            
 
 def logout_user():
     st.session_state.clear()
