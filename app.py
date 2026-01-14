@@ -435,7 +435,71 @@ def render_ai():
                     st.markdown(res.choices[0].message.content)
                 except Exception as e:
                     st.error(f"AI Error: {e}")
+    # ==========================================
+    # NEW: CONVERSATIONAL CHAT INTERFACE
+    # ==========================================
+    st.divider()
+    st.subheader(f"💬 Chat about {sel}")
+    st.caption("Ask follow-up questions to refine your retention strategy.")
 
+    # 1. Initialize Chat History (Specific to this module)
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # 2. Reset Chat if Customer Changes (Optional but recommended)
+    if "last_selected_cust" not in st.session_state or st.session_state.last_selected_cust != sel:
+        st.session_state.messages = []
+        st.session_state.last_selected_cust = sel
+
+    # 3. Display Chat History
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # 4. Handle New User Input
+    if prompt := st.chat_input(f"Ask AI about {sel}..."):
+        # Display User Message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Generate AI Response
+        with st.chat_message("assistant"):
+            if not groq_client:
+                st.error("AI Key Missing")
+                response_text = "Error: No API Key"
+            else:
+                try:
+                    # Context-Aware System Prompt
+                    system_context = f"""
+                    You are a Senior Retention Specialist.
+                    Focus Customer: {sel}
+                    - Status: {data['Lifecycle_Stage']}
+                    - Days Inactive: {data['Recency']}
+                    - Total Value: ₹{data['LTV']}
+                    - Favorite Product: {data['Fav_Product']}
+                    - Risk Score: {data['Churn_Risk_Score']}/100
+                    
+                    Answer the user's question specifically about this customer. 
+                    Keep answers concise, professional, and actionable.
+                    """
+                    
+                    stream = groq_client.chat.completions.create(
+                        model="llama-3.1-8b-instant", # Using the new, faster model
+                        messages=[
+                            {"role": "system", "content": system_context},
+                            *st.session_state.messages
+                        ],
+                        stream=True
+                    )
+                    response_text = st.write_stream(stream)
+                    
+                    # Save AI Response
+                    st.session_state.messages.append({"role": "assistant", "content": response_text})
+                    
+                except Exception as e:
+                    st.error(f"Chat Error: {e}")
+                    
 # ==========================================
 # 5. MAIN ROUTING
 # ==========================================
