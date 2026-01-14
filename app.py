@@ -194,13 +194,28 @@ def render_login():
     st.markdown("<div style='text-align: center; padding: 40px;'><h1>📉 RetainIQ</h1><p>Customer Churn Analysis Suite</p></div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
-        with st.form("login_form"):
-            e = st.text_input("Email")
-            p = st.text_input("Password", type="password")
-            if st.form_submit_button("Access Dashboard", use_container_width=True):
-                login_user(e, p)
-        st.caption("Evaluators: Use `admin` / `admin` if DB is offline.")
+        # Create Tabs to switch between Login and Sign Up
+        tab1, tab2 = st.tabs(["Login", "Create Account"])
+        
+        # --- TAB 1: LOGIN ---
+        with tab1:
+            with st.form("login_form"):
+                e = st.text_input("Email", key="login_email")
+                p = st.text_input("Password", type="password", key="login_pass")
+                if st.form_submit_button("Access Dashboard", use_container_width=True):
+                    login_user(e, p)
+            st.caption("Evaluators: Use `admin` / `admin` if DB is offline.")
 
+        # --- TAB 2: SIGN UP ---
+        with tab2:
+            st.markdown("### New User?")
+            with st.form("signup_form"):
+                new_email = st.text_input("Email", key="signup_email")
+                new_name = st.text_input("Full Name", key="signup_name")
+                new_pass = st.text_input("Password", type="password", key="signup_pass")
+                if st.form_submit_button("Register Now", use_container_width=True):
+                    signup_user(new_email, new_pass, new_name)
+                    
 def render_dashboard():
     st.title("📊 Customer Churn Analysis")
     st.markdown("Diagnose retention health using behavioral transaction data.")
